@@ -1,0 +1,272 @@
+{
+  "schema_version": "aylamed-coverage-matrix-v1",
+  "batch_id": "usmle-step1-2026-b015-in-chat-20",
+  "status": "private_research_matrix",
+  "publication_allowed": false,
+  "source_export": {
+    "records": 7937,
+    "unique_title_clusters": 2647
+  },
+  "entries": [
+    {
+      "draft_id": "AY26-B015-CV-DCM-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Cardiomyopathy and ventricular remodeling",
+        "topic": "Dilated cardiomyopathy",
+        "subtopic": "Eccentric remodeling and sarcomeres added in series"
+      },
+      "learning_objective": "Relate systolic failure in dilated cardiomyopathy to sarcomeres added in series, myocyte elongation, chamber dilation, and eccentric remodeling.",
+      "media_path": "research/usmle-step1-2026/media/dilated-cardiomyopathy-eccentric-remodeling.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B015-NEURO-GBM-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Primary central nervous system tumors",
+        "topic": "Glioblastoma",
+        "subtopic": "Pseudopalisading necrosis, hypoxia, and VEGF-driven microvascular proliferation"
+      },
+      "learning_objective": "Connect glioblastoma pseudopalisading necrosis to hypoxia-induced HIF-1α stabilization, VEGF secretion, and microvascular proliferation.",
+      "media_path": "research/usmle-step1-2026/media/glioblastoma-hypoxia-pseudopalisading-vegf.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B015-NEURO-MENINGIOMA-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Primary central nervous system tumors",
+        "topic": "Meningioma",
+        "subtopic": "Arachnoid cap-cell origin, whorls, and psammoma bodies"
+      },
+      "learning_objective": "Identify a dural-based whorled tumor with psammoma bodies as a meningioma derived from arachnoid cap cells.",
+      "media_path": "research/usmle-step1-2026/media/meningioma-arachnoid-whorls-psammoma.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-GI-PSC-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Cholestatic and biliary disease",
+        "topic": "Primary sclerosing cholangitis",
+        "subtopic": "Multifocal strictures and concentric periductal fibrosis"
+      },
+      "learning_objective": "Recognize primary sclerosing cholangitis by ulcerative colitis, cholestasis, beaded ducts, and concentric periductal fibrosis.",
+      "media_path": "research/usmle-step1-2026/media/psc-beading-onion-skin.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-GI-PBC-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Cholestatic and biliary disease",
+        "topic": "Primary biliary cholangitis",
+        "subtopic": "Antimitochondrial immunity to pyruvate dehydrogenase complex E2"
+      },
+      "learning_objective": "Link the cholestatic phenotype of primary biliary cholangitis to antimitochondrial antibodies against pyruvate dehydrogenase complex E2.",
+      "media_path": "research/usmle-step1-2026/media/pbc-pdc-e2-florid-duct.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-GI-PDAC-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Pancreatic neoplasia",
+        "topic": "Pancreatic ductal adenocarcinoma",
+        "subtopic": "Activated stellate cells and desmoplastic stroma"
+      },
+      "learning_objective": "Explain the dense desmoplastic stroma of pancreatic ductal adenocarcinoma through activation of pancreatic stellate cells and cancer-associated fibroblasts.",
+      "media_path": "research/usmle-step1-2026/media/pancreatic-cancer-desmoplastic-stroma.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B015-ID-CHOLERA-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Enteric bacterial infection",
+        "topic": "Cholera",
+        "subtopic": "Gsα ADP-ribosylation, cAMP, and CFTR-mediated chloride secretion"
+      },
+      "learning_objective": "Trace cholera toxin from persistent Gs activation to increased cAMP, CFTR-mediated chloride secretion, and massive noninflammatory watery diarrhea.",
+      "media_path": "research/usmle-step1-2026/media/cholera-gs-camp-cftr.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-ID-DIPHTHERIA-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Upper respiratory bacterial infection",
+        "topic": "Diphtheria",
+        "subtopic": "ADP-ribosylation of diphthamide on eukaryotic elongation factor 2"
+      },
+      "learning_objective": "Identify diphtheria toxin as an NAD-dependent ADP-ribosyltransferase that inactivates eEF-2 and stops protein synthesis.",
+      "media_path": "research/usmle-step1-2026/media/diphtheria-ef2-adp-ribosylation.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-ID-TETANUS-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neurotoxic bacterial disease",
+        "topic": "Tetanus",
+        "subtopic": "Synaptobrevin cleavage and loss of inhibitory neurotransmitter release"
+      },
+      "learning_objective": "Differentiate tetanus from other neuromuscular disorders by linking synaptobrevin cleavage in inhibitory interneurons to loss of GABA/glycine release and spastic paralysis.",
+      "media_path": "research/usmle-step1-2026/media/tetanus-synaptobrevin-inhibitory-block.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-ID-BOTULISM-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neuromuscular junction disorders",
+        "topic": "Botulism",
+        "subtopic": "SNARE proteolysis and failure of presynaptic acetylcholine release"
+      },
+      "learning_objective": "Explain botulism as peripheral cholinergic paralysis caused by toxin-mediated SNARE cleavage and failure of acetylcholine vesicle fusion.",
+      "media_path": "research/usmle-step1-2026/media/botulism-snare-ach-block.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-IMM-WAS-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Combined immunodeficiency",
+        "topic": "Wiskott-Aldrich syndrome",
+        "subtopic": "WASp-Arp2/3 actin remodeling at hematopoietic immune synapses"
+      },
+      "learning_objective": "Connect eczema, recurrent infection, and small-platelet thrombocytopenia to defective WASp-dependent actin remodeling in hematopoietic cells.",
+      "media_path": "research/usmle-step1-2026/media/wiskott-wasp-actin-synapse.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B015-NEURO-LEMS-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neuromuscular junction disorders",
+        "topic": "Lambert-Eaton myasthenic syndrome",
+        "subtopic": "Presynaptic P/Q-type calcium-channel autoimmunity and facilitation"
+      },
+      "learning_objective": "Recognize Lambert-Eaton syndrome as presynaptic P/Q-type calcium-channel autoimmunity causing reduced acetylcholine release and exercise-related facilitation.",
+      "media_path": "research/usmle-step1-2026/media/lambert-eaton-presynaptic-calcium.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-ENDO-ACROMEGALY-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Pituitary hormone excess",
+        "topic": "Acromegaly",
+        "subtopic": "IGF-1 elevation and failure of growth-hormone suppression after oral glucose"
+      },
+      "learning_objective": "Use elevated IGF-1 and failure of oral-glucose-mediated GH suppression to confirm autonomous growth-hormone secretion in acromegaly.",
+      "media_path": "research/usmle-step1-2026/media/acromegaly-gh-igf1-glucose.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-REPRO-ENDOMETRIOSIS-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Gynecologic disorders",
+        "topic": "Endometriosis",
+        "subtopic": "Ectopic endometrial glands and stroma with cyclic hemorrhage"
+      },
+      "learning_objective": "Diagnose endometriosis by ectopic endometrial glands and stroma with cyclic hemorrhage, fibrosis, and hemosiderin-laden macrophages.",
+      "media_path": "research/usmle-step1-2026/media/endometriosis-ectopic-glands-hemosiderin.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-RENAL-LITHIUM-NDI-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Water-balance disorders",
+        "topic": "Lithium-induced nephrogenic diabetes insipidus",
+        "subtopic": "ENaC-mediated lithium entry and aquaporin-2 downregulation"
+      },
+      "learning_objective": "Explain lithium-induced nephrogenic diabetes insipidus through ENaC entry into principal cells, aquaporin-2 downregulation, and the targeted benefit of amiloride.",
+      "media_path": "research/usmle-step1-2026/media/lithium-enac-aqp2-amiloride.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B015-CV-DIGOXIN-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Cardiovascular pharmacology and toxicology",
+        "topic": "Digoxin toxicity",
+        "subtopic": "Sodium-potassium ATPase inhibition and extracellular potassium shift"
+      },
+      "learning_objective": "Connect severe digoxin toxicity to sodium-potassium ATPase inhibition, hyperkalemia, intracellular calcium loading, and arrhythmogenesis.",
+      "media_path": "research/usmle-step1-2026/media/digoxin-na-k-atpase-fab.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-REPRO-KLINEFELTER-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Male reproductive genetics",
+        "topic": "Klinefelter syndrome",
+        "subtopic": "Seminiferous tubular hyalinization and hypergonadotropic hypogonadism"
+      },
+      "learning_objective": "Relate the Klinefelter phenotype and hypergonadotropic hypogonadism to seminiferous tubular hyalinization, germ-cell loss, and Leydig-cell dysfunction.",
+      "media_path": "research/usmle-step1-2026/media/klinefelter-seminiferous-hyalinization.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-GEN-DOWN-ROB-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Cytogenetics",
+        "topic": "Robertsonian translocation Down syndrome",
+        "subtopic": "Meiotic segregation in a balanced rob(14;21) carrier"
+      },
+      "learning_objective": "Apply meiotic segregation of a balanced rob(14;21) carrier to identify the gamete that produces three copies of chromosome 21q.",
+      "media_path": "research/usmle-step1-2026/media/down-robertsonian-14-21.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B015-GU-PROSTATE-BONE-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Male reproductive oncology",
+        "topic": "Metastatic prostate adenocarcinoma",
+        "subtopic": "Osteoblastic skeletal metastases and elevated alkaline phosphatase"
+      },
+      "learning_objective": "Recognize prostate-cancer skeletal metastases as osteoblastic-predominant lesions produced by tumor-stimulated new bone formation.",
+      "media_path": "research/usmle-step1-2026/media/prostate-osteoblastic-metastases.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B015-HEME-WARFARIN-NECROSIS-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Anticoagulant pharmacology",
+        "topic": "Warfarin-induced skin necrosis",
+        "subtopic": "Rapid protein C depletion and transient microvascular thrombosis"
+      },
+      "learning_objective": "Explain early warfarin skin necrosis through rapid depletion of protein C, transient hypercoagulability, and dermal microvascular thrombosis.",
+      "media_path": "research/usmle-step1-2026/media/warfarin-protein-c-skin-necrosis.svg",
+      "difficulty": "hard"
+    }
+  ]
+}

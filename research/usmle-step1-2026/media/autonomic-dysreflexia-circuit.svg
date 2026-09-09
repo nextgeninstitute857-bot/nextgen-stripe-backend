@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="680" viewBox="0 0 980 680" role="img" aria-labelledby="title desc">
+  <title id="title">Autonomic dysreflexia after a high spinal cord injury</title>
+  <desc id="desc">Original schematic showing a bladder stimulus below a T4 spinal lesion, sympathetic vasoconstriction below the lesion, baroreceptor activation, vagal bradycardia, and limited vasodilation above the lesion.</desc>
+  <rect width="980" height="680" fill="#ffffff"/>
+  <text x="490" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#173f4c">Autonomic dysreflexia</text>
+  <rect x="420" y="90" width="140" height="470" rx="60" fill="#eef5f7" stroke="#3a7580" stroke-width="4"/>
+  <text x="490" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#173f4c">Spinal cord</text>
+  <line x1="420" y1="250" x2="560" y2="250" stroke="#bb3d3d" stroke-width="12"/>
+  <text x="585" y="245" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#9a3030">T4 lesion</text>
+  <text x="585" y="269" font-family="Arial, sans-serif" font-size="15" fill="#9a3030">descending inhibition blocked</text>
+
+  <ellipse cx="490" cy="610" rx="95" ry="48" fill="#dcecf7" stroke="#39739d" stroke-width="4"/>
+  <text x="490" y="605" text-anchor="middle" font-family="Arial, sans-serif" font-size="19" font-weight="700" fill="#214f70">Distended bladder</text>
+  <text x="490" y="630" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#214f70">noxious afferent stimulus</text>
+  <line x1="490" y1="562" x2="490" y2="510" stroke="#39739d" stroke-width="6" marker-end="url(#blueArrow)"/>
+
+  <path d="M445 470 C330 455 245 410 175 350" fill="none" stroke="#c74444" stroke-width="7" marker-end="url(#redArrow)"/>
+  <rect x="45" y="300" width="220" height="112" rx="16" fill="#fff0f0" stroke="#c74444" stroke-width="3"/>
+  <text x="155" y="332" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#8e2e2e">Below the lesion</text>
+  <text x="155" y="361" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#8e2e2e">massive sympathetic</text>
+  <text x="155" y="385" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#8e2e2e">vasoconstriction</text>
+  <text x="155" y="408" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#8e2e2e">severe hypertension</text>
+
+  <ellipse cx="490" cy="80" rx="145" ry="38" fill="#f1eef9" stroke="#71579d" stroke-width="3"/>
+  <text x="490" y="86" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#513d74">Brainstem baroreflex center</text>
+  <path d="M560 150 C680 145 740 180 790 230" fill="none" stroke="#71579d" stroke-width="6" marker-end="url(#purpleArrow)"/>
+  <rect x="720" y="230" width="220" height="105" rx="16" fill="#f4f0fb" stroke="#71579d" stroke-width="3"/>
+  <text x="830" y="260" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#513d74">Above the lesion</text>
+  <text x="830" y="288" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#513d74">vagal activation</text>
+  <text x="830" y="313" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#513d74">bradycardia + flushing</text>
+
+  <path d="M420 180 C300 165 245 180 195 215" fill="none" stroke="#3c8b69" stroke-width="6" marker-end="url(#greenArrow)"/>
+  <rect x="45" y="155" width="220" height="92" rx="16" fill="#edf8f2" stroke="#3c8b69" stroke-width="3"/>
+  <text x="155" y="187" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#286449">Baroreceptors sense</text>
+  <text x="155" y="214" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#286449">the blood-pressure rise</text>
+
+  <rect x="670" y="445" width="260" height="105" rx="16" fill="#fff8e7" stroke="#c48a1c" stroke-width="3"/>
+  <text x="800" y="477" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#835b0d">Key limitation</text>
+  <text x="800" y="505" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#835b0d">brainstem compensation cannot</text>
+  <text x="800" y="529" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#835b0d">cross the spinal cord lesion</text>
+  <defs>
+    <marker id="blueArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#39739d"/></marker>
+    <marker id="redArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#c74444"/></marker>
+    <marker id="purpleArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#71579d"/></marker>
+    <marker id="greenArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#3c8b69"/></marker>
+  </defs>
+</svg>

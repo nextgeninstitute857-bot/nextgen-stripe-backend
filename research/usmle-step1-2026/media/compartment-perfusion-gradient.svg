@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620" role="img" aria-labelledby="title desc">
+<title id="title">Closed-compartment pressure and perfusion</title><desc id="desc">Graph of compartment, venous and arterial pressures showing the loss of the perfusion gradient.</desc>
+<rect width="1000" height="620" fill="#ffffff"/><rect x="20" y="20" width="960" height="580" rx="20" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+<text x="50" y="65" font-family="Arial,sans-serif" font-size="30" font-weight="700" fill="#0f172a">Closed-compartment pressure and perfusion</text>
+<line x1="110" y1="500" x2="900" y2="500" stroke="#0f172a" stroke-width="3"/><line x1="110" y1="500" x2="110" y2="120" stroke="#0f172a" stroke-width="3"/>
+<text x="410" y="545" font-family="Arial" font-size="20">Increasing edema / compartment volume</text><text x="30" y="320" transform="rotate(-90 30 320)" font-family="Arial" font-size="20">Pressure</text>
+<path d="M120 190 C350 195 600 205 890 230" fill="none" stroke="#dc2626" stroke-width="7"/><text x="730" y="205" font-family="Arial" font-size="18">Arterial pressure</text>
+<path d="M120 440 C300 425 500 360 890 190" fill="none" stroke="#7c3aed" stroke-width="7"/><text x="670" y="310" font-family="Arial" font-size="18">Compartment pressure</text>
+<path d="M120 455 C300 440 520 395 760 300" fill="none" stroke="#0284c7" stroke-width="7" stroke-dasharray="12 8"/><text x="610" y="425" font-family="Arial" font-size="18">Venous pressure rises</text>
+<line x1="760" y1="230" x2="760" y2="300" stroke="#0f172a" stroke-width="4"/><polygon points="750,240 770,240 760,225" fill="#0f172a"/><polygon points="750,290 770,290 760,305" fill="#0f172a"/>
+<text x="775" y="270" font-family="Arial" font-size="18">Narrow gradient</text>
+<rect x="180" y="260" width="250" height="90" rx="12" fill="#fff7ed" stroke="#c2410c"/><text x="200" y="295" font-family="Arial" font-size="19">Venules collapse first</text><text x="200" y="325" font-family="Arial" font-size="19">→ filtration → more edema</text>
+<text x="50" y="585" font-family="Arial,sans-serif" font-size="16" fill="#475569">AylaMed original teaching graphic — private research draft</text>
+</svg>

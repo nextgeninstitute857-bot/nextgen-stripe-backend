@@ -1,0 +1,463 @@
+{
+  "schema_version": "aylamed-backend-driven-gap-queue-v1",
+  "batch_id": "usmle-step1-2026-b011-in-chat-20-queue",
+  "created_at": "2026-08-04T16:43:00+05:00",
+  "status": "private_research_queue",
+  "publication_allowed": false,
+  "source_export": {
+    "records": 7937,
+    "unique_title_clusters": 2647,
+    "explicit_media_candidates": 786,
+    "use": "coverage_frequency_and_media-priority_signals_only"
+  },
+  "selection_controls": {
+    "target_questions": 20,
+    "all_objectives_distinct": true,
+    "avoid_batches": "001-010",
+    "full_stem_similarity_check_required_before_commit": true,
+    "proprietary_text_or_media_used": false,
+    "original_media_required": true
+  },
+  "entries": [
+    {
+      "rank": 1,
+      "backend_title": "Interstitial lung disease",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Interstitial and restrictive lung disease",
+        "topic": "Idiopathic pulmonary fibrosis",
+        "subtopic": "Usual interstitial pneumonia, fibroblastic foci, and basal subpleural honeycombing"
+      },
+      "learning_objective": "Differentiate usual interstitial pneumonia from other interstitial patterns by its temporally heterogeneous fibroblastic foci and basal subpleural honeycombing, and connect epithelial injury to profibrotic TGF-beta signaling.",
+      "media_spec": "Original paired high-resolution CT and histology schematic showing basal peripheral reticulation, traction bronchiectasis, honeycomb cysts, and patchy fibroblastic foci.",
+      "distinctness_note": "No prior draft targets UIP pattern recognition or TGF-beta-driven pulmonary fibrosis.",
+      "backend_evidence": {
+        "question_count": 14,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 8,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 2,
+        "example_student_qid": "NGQ-00000043"
+      }
+    },
+    {
+      "rank": 2,
+      "backend_title": "Hemangioma",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Vascular tumors",
+        "topic": "Infantile hemangioma",
+        "subtopic": "GLUT1-positive proliferative and involution phases"
+      },
+      "learning_objective": "Recognize infantile hemangioma as a benign GLUT1-positive endothelial proliferation that grows after birth and usually involutes, distinguishing it from vascular malformations present at birth.",
+      "media_spec": "Original age-course diagram with proliferative and involution phases plus a GLUT1-positive endothelial-channel schematic.",
+      "distinctness_note": "No prior draft covers infantile vascular tumors or their natural history.",
+      "backend_evidence": {
+        "question_count": 12,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 3,
+        "radiology_count": 1,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00003997"
+      }
+    },
+    {
+      "rank": 3,
+      "backend_title": "Head and neck cancers",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Head and neck oncology",
+        "topic": "Oropharyngeal squamous-cell carcinoma",
+        "subtopic": "HPV16 E6/E7, p53/RB disruption, and p16 overexpression"
+      },
+      "learning_objective": "Explain why HPV-associated oropharyngeal squamous carcinoma shows p16 overexpression through E7-mediated RB inactivation and distinguish it from tobacco-associated field carcinogenesis.",
+      "media_spec": "Original tonsillar anatomy and molecular pathway schematic linking HPV E6/E7 to p53/RB loss and p16 overexpression.",
+      "distinctness_note": "No prior draft targets HPV-positive oropharyngeal carcinoma.",
+      "backend_evidence": {
+        "question_count": 10,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 9,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00000052"
+      }
+    },
+    {
+      "rank": 4,
+      "backend_title": "Congenital anomalies of kidney and urinary tract",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Congenital urinary obstruction",
+        "topic": "Posterior urethral valves",
+        "subtopic": "Bladder outlet obstruction, bilateral hydronephrosis, and oligohydramnios"
+      },
+      "learning_objective": "Identify posterior urethral valves as a male fetal bladder-outlet obstruction that causes a distended bladder, bilateral hydroureteronephrosis, oligohydramnios, and pulmonary hypoplasia.",
+      "media_spec": "Original fetal urinary-tract ultrasound schematic showing dilated bladder, proximal urethra, bilateral hydronephrosis, and low amniotic fluid.",
+      "distinctness_note": "No prior draft covers congenital lower-urinary-tract obstruction.",
+      "backend_evidence": {
+        "question_count": 9,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 5,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00000736"
+      }
+    },
+    {
+      "rank": 5,
+      "backend_title": "Contact dermatitis",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Inflammatory dermatoses",
+        "topic": "Allergic contact dermatitis",
+        "subtopic": "Hapten-specific type IV delayed hypersensitivity"
+      },
+      "learning_objective": "Connect allergic contact dermatitis to hapten modification of skin proteins, Langerhans-cell priming, and memory T-cell-mediated delayed inflammation on re-exposure.",
+      "media_spec": "Original two-stage sensitization and elicitation diagram with epidermal hapten, dendritic cell, lymph node, and T-cell return to skin.",
+      "distinctness_note": "No prior draft covers contact-allergen hapten biology.",
+      "backend_evidence": {
+        "question_count": 9,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 5,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00003846"
+      }
+    },
+    {
+      "rank": 6,
+      "backend_title": "Melanoma",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Cutaneous malignancy",
+        "topic": "Melanoma",
+        "subtopic": "Breslow depth and vertical growth as prognostic determinants"
+      },
+      "learning_objective": "Use Breslow thickness to assess melanoma prognosis and distinguish radial growth from invasive vertical growth into the dermis.",
+      "media_spec": "Original skin cross-section showing radial epidermal spread, vertical dermal invasion, and a Breslow measurement line.",
+      "distinctness_note": "No prior draft targets melanoma depth staging or growth phases.",
+      "backend_evidence": {
+        "question_count": 9,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 7,
+        "radiology_count": 1,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005233"
+      }
+    },
+    {
+      "rank": 7,
+      "backend_title": "Nephron structure & physiology",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Tubular physiology",
+        "topic": "Proximal tubule transport",
+        "subtopic": "Fanconi syndrome and generalized proximal solute wasting"
+      },
+      "learning_objective": "Localize glucosuria with normal serum glucose, phosphaturia, aminoaciduria, and bicarbonate wasting to generalized proximal-tubule dysfunction.",
+      "media_spec": "Original nephron map highlighting proximal reabsorption of glucose, phosphate, amino acids, and bicarbonate with urinary-loss arrows.",
+      "distinctness_note": "Existing nephron drafts focus on loop diuretics and glomerular disease, not generalized proximal transport failure.",
+      "backend_evidence": {
+        "question_count": 9,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 1,
+        "example_student_qid": "NGQ-00003890"
+      }
+    },
+    {
+      "rank": 8,
+      "backend_title": "Bone tumor",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Primary bone tumors",
+        "topic": "Osteosarcoma",
+        "subtopic": "Malignant osteoid, metaphyseal growth, and RB1 association"
+      },
+      "learning_objective": "Recognize osteosarcoma by metaphyseal destructive bone formation with malignant osteoid and connect risk to RB1 and TP53 pathway defects.",
+      "media_spec": "Original distal-femur radiograph schematic with sunburst periosteal reaction and Codman triangle plus malignant-osteoid histology.",
+      "distinctness_note": "No prior draft covers primary malignant bone tumors.",
+      "backend_evidence": {
+        "question_count": 7,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 6,
+        "radiology_count": 1,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00002937"
+      }
+    },
+    {
+      "rank": 9,
+      "backend_title": "Infectious mononucleosis",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Viral lymphoproliferative infection",
+        "topic": "Epstein-Barr virus infectious mononucleosis",
+        "subtopic": "B-cell infection and reactive CD8-positive atypical lymphocytes"
+      },
+      "learning_objective": "Explain that EBV infects B cells through CD21 while the atypical lymphocytes in peripheral blood are activated cytotoxic T cells responding to infected B cells.",
+      "media_spec": "Original EBV-B-cell/CD21 and reactive CD8-cell schematic with peripheral-smear morphology.",
+      "distinctness_note": "No prior draft covers EBV mononucleosis cellular immunology.",
+      "backend_evidence": {
+        "question_count": 7,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 4,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005784"
+      }
+    },
+    {
+      "rank": 10,
+      "backend_title": "Kaposi sarcoma",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Opportunistic neoplasia",
+        "topic": "Kaposi sarcoma",
+        "subtopic": "HHV-8 spindle-cell vascular proliferation in immunodeficiency"
+      },
+      "learning_objective": "Recognize Kaposi sarcoma as an HHV-8-associated spindle-cell vascular tumor with slit-like spaces and extravasated erythrocytes in immunodeficiency.",
+      "media_spec": "Original purple skin-lesion and histology schematic showing spindle cells, vascular slits, and red-cell extravasation.",
+      "distinctness_note": "No prior draft covers HHV-8-associated vascular neoplasia.",
+      "backend_evidence": {
+        "question_count": 7,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 3,
+        "radiology_count": 1,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00004851"
+      }
+    },
+    {
+      "rank": 11,
+      "backend_title": "Osteoarthritis",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Degenerative joint disease",
+        "topic": "Osteoarthritis",
+        "subtopic": "Articular cartilage loss, subchondral sclerosis, and osteophyte formation"
+      },
+      "learning_objective": "Distinguish osteoarthritis from inflammatory arthritis by focal cartilage degeneration, subchondral sclerosis, osteophytes, and activity-related pain with brief morning stiffness.",
+      "media_spec": "Original weight-bearing knee radiograph schematic and cartilage cross-section showing asymmetric joint-space loss, sclerosis, and osteophytes.",
+      "distinctness_note": "No prior draft covers degenerative joint pathology.",
+      "backend_evidence": {
+        "question_count": 6,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 1,
+        "radiology_count": 2,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00000120"
+      }
+    },
+    {
+      "rank": 12,
+      "backend_title": "Actinic keratoses",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Premalignant epidermal lesions",
+        "topic": "Actinic keratosis",
+        "subtopic": "UVB-induced keratinocyte dysplasia and progression to squamous carcinoma"
+      },
+      "learning_objective": "Recognize actinic keratosis as UV-induced atypia confined largely to the lower epidermis and a precursor to cutaneous squamous-cell carcinoma.",
+      "media_spec": "Original sun-exposed skin and histology schematic showing parakeratosis and basal keratinocyte atypia without dermal invasion.",
+      "distinctness_note": "No prior draft covers actinic keratosis or cutaneous SCC precursors.",
+      "backend_evidence": {
+        "question_count": 5,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 3,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00004063"
+      }
+    },
+    {
+      "rank": 13,
+      "backend_title": "Scabies",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Ectoparasitic disease",
+        "topic": "Scabies",
+        "subtopic": "Sarcoptes burrows and delayed hypersensitivity pruritus"
+      },
+      "learning_objective": "Identify scabies from nocturnal pruritus and burrows in interdigital or flexural sites, and explain symptoms as a delayed hypersensitivity response to mites and products.",
+      "media_spec": "Original epidermal-burrow cross-section with mite, eggs, fecal pellets, and typical hand distribution map.",
+      "distinctness_note": "No prior draft covers ectoparasitic skin disease.",
+      "backend_evidence": {
+        "question_count": 5,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00004435"
+      }
+    },
+    {
+      "rank": 14,
+      "backend_title": "Atelectasis",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Lung-volume loss",
+        "topic": "Obstructive atelectasis",
+        "subtopic": "Resorption distal to airway obstruction and ipsilateral mediastinal shift"
+      },
+      "learning_objective": "Differentiate obstructive atelectasis from tension physiology by recognizing volume loss and mediastinal shift toward the collapsed lung after bronchial obstruction.",
+      "media_spec": "Original chest radiograph schematic comparing mucus-plug atelectasis with tension pneumothorax and showing direction of mediastinal shift.",
+      "distinctness_note": "Prior pneumothorax draft covers pressure and contralateral shift, not resorptive volume loss.",
+      "backend_evidence": {
+        "question_count": 4,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 4,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005141"
+      }
+    },
+    {
+      "rank": 15,
+      "backend_title": "Keloid",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Wound healing",
+        "topic": "Keloid scar",
+        "subtopic": "TGF-beta-driven collagen deposition beyond original wound boundaries"
+      },
+      "learning_objective": "Distinguish keloids from hypertrophic scars by extension beyond the original wound and persistent excessive collagen deposition driven by fibroblast signaling.",
+      "media_spec": "Original side-by-side scar cross-section comparing hypertrophic scar confined to the wound with keloid extension beyond its borders.",
+      "distinctness_note": "No prior draft covers abnormal wound-healing scars.",
+      "backend_evidence": {
+        "question_count": 4,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00002377"
+      }
+    },
+    {
+      "rank": 16,
+      "backend_title": "Brachial plexus",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Peripheral nerve anatomy",
+        "topic": "Upper trunk brachial plexopathy",
+        "subtopic": "C5-C6 injury and Erb-Duchenne posture"
+      },
+      "learning_objective": "Localize loss of shoulder abduction, lateral rotation, elbow flexion, and forearm supination after traction injury to the upper trunk C5-C6.",
+      "media_spec": "Original brachial-plexus roots-to-branches diagram highlighting the upper trunk and affected muscle actions.",
+      "distinctness_note": "No prior draft covers brachial-plexus localization.",
+      "backend_evidence": {
+        "question_count": 17,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 3,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00000121"
+      }
+    },
+    {
+      "rank": 17,
+      "backend_title": "Alpha1 antitrypsin deficiency",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Genetic emphysema and liver disease",
+        "topic": "Alpha-1 antitrypsin deficiency",
+        "subtopic": "Unopposed neutrophil elastase and misfolded hepatic protein retention"
+      },
+      "learning_objective": "Link lower-lobe panacinar emphysema to unopposed neutrophil elastase and liver injury to intracellular retention of misfolded alpha-1 antitrypsin.",
+      "media_spec": "Original lung lobule and hepatocyte diagram showing panacinar destruction and PAS-positive diastase-resistant globules.",
+      "distinctness_note": "No prior draft targets the dual lung-liver mechanism of alpha-1 antitrypsin deficiency.",
+      "backend_evidence": {
+        "question_count": 16,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 3,
+        "radiology_count": 5,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00003987"
+      }
+    },
+    {
+      "rank": 18,
+      "backend_title": "Inflammatory bowel disease",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Inflammatory bowel disease",
+        "topic": "Crohn disease",
+        "subtopic": "Terminal ileal bile-salt loss, fat malabsorption, and calcium oxalate stones"
+      },
+      "learning_objective": "Explain why terminal-ileal Crohn disease increases calcium oxalate nephrolithiasis through bile-salt malabsorption, free fatty-acid calcium binding, and increased colonic oxalate absorption.",
+      "media_spec": "Original enterohepatic and intestinal-lumen schematic showing unabsorbed fatty acids binding calcium and free oxalate entering the colon and kidney.",
+      "distinctness_note": "No prior draft covers the enteric-hyperoxaluria complication of Crohn disease.",
+      "backend_evidence": {
+        "question_count": 15,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 5,
+        "radiology_count": 1,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00000039"
+      }
+    },
+    {
+      "rank": 19,
+      "backend_title": "Pituitary adenoma",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Pituitary tumors",
+        "topic": "Pituitary macroadenoma",
+        "subtopic": "Optic-chiasm compression and bitemporal hemianopia"
+      },
+      "learning_objective": "Localize bitemporal hemianopia from a sellar macroadenoma to compression of crossing nasal retinal fibers at the optic chiasm.",
+      "media_spec": "Original sellar MRI and visual-pathway diagram highlighting optic-chiasm compression and temporal visual-field loss.",
+      "distinctness_note": "No prior draft covers pituitary mass-effect neuroanatomy.",
+      "backend_evidence": {
+        "question_count": 15,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 3,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005964"
+      }
+    },
+    {
+      "rank": 20,
+      "backend_title": "Acute pancreatitis",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Pancreatic injury",
+        "topic": "Acute pancreatitis",
+        "subtopic": "Premature trypsin activation, fat necrosis, and hypocalcemia"
+      },
+      "learning_objective": "Connect premature intrapancreatic trypsin activation to autodigestion, peripancreatic fat necrosis, and calcium soap formation that can lower serum calcium.",
+      "media_spec": "Original pancreatic acinar activation cascade plus CT-style peripancreatic inflammation and fat-saponification schematic.",
+      "distinctness_note": "No prior draft targets pancreatitis enzyme activation and hypocalcemia.",
+      "backend_evidence": {
+        "question_count": 12,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 7,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00003902"
+      }
+    }
+  ]
+}

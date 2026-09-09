@@ -1,0 +1,31 @@
+name: Validate USMLE Pilot Generator
+
+on:
+  pull_request:
+    paths:
+      - "research/usmle-step1-2026/pilot-100/**"
+      - "scripts/run-usmle-pilot-generator.mjs"
+      - "scripts/lib/usmle-pilot-*.mjs"
+      - "scripts/validate-usmle-pilot-generator.mjs"
+      - ".github/workflows/validate-usmle-pilot-generator.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bounded-dry-run:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax check generator
+        run: |
+          node --check scripts/run-usmle-pilot-generator.mjs
+          node --check scripts/lib/usmle-pilot-core.mjs
+          node --check scripts/lib/usmle-pilot-schemas.mjs
+          node --check scripts/lib/usmle-pilot-quality.mjs
+      - name: Validate bounded 100-question plan
+        run: node scripts/validate-usmle-pilot-generator.mjs

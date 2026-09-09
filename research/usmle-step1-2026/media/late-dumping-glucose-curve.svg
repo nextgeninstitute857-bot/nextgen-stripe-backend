@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="560" viewBox="0 0 920 560" role="img" aria-labelledby="title desc">
+  <title id="title">Postprandial glucose in late dumping syndrome</title>
+  <desc id="desc">Original line graph comparing a healthy glucose curve with an early high peak and later hypoglycemia after gastric surgery.</desc>
+  <rect width="920" height="560" fill="#ffffff"/>
+  <text x="460" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="27" font-weight="700" fill="#173f4c">Postprandial plasma glucose</text>
+  <line x1="105" y1="470" x2="850" y2="470" stroke="#284b55" stroke-width="3"/>
+  <line x1="105" y1="85" x2="105" y2="470" stroke="#284b55" stroke-width="3"/>
+  <g font-family="Arial, sans-serif" font-size="16" fill="#284b55">
+    <text x="105" y="502" text-anchor="middle">0</text><text x="290" y="502" text-anchor="middle">30</text><text x="475" y="502" text-anchor="middle">60</text><text x="660" y="502" text-anchor="middle">90</text><text x="845" y="502" text-anchor="middle">120</text>
+    <text x="475" y="536" text-anchor="middle">Minutes after carbohydrate meal</text>
+    <text transform="translate(30 280) rotate(-90)" text-anchor="middle">Plasma glucose (mg/dL)</text>
+    <text x="82" y="474" text-anchor="end">40</text><text x="82" y="397" text-anchor="end">70</text><text x="82" y="320" text-anchor="end">100</text><text x="82" y="243" text-anchor="end">130</text><text x="82" y="166" text-anchor="end">160</text><text x="82" y="89" text-anchor="end">190</text>
+  </g>
+  <g stroke="#d7e5e8" stroke-width="1">
+    <line x1="105" y1="393" x2="850" y2="393"/><line x1="105" y1="316" x2="850" y2="316"/><line x1="105" y1="239" x2="850" y2="239"/><line x1="105" y1="162" x2="850" y2="162"/><line x1="105" y1="85" x2="850" y2="85"/>
+  </g>
+  <path d="M105 342 C210 265 310 252 410 287 C520 327 650 334 845 330" fill="none" stroke="#3a7d8c" stroke-width="6"/>
+  <path d="M105 342 C205 100 315 115 420 225 C545 355 655 470 845 420" fill="none" stroke="#c84b4b" stroke-width="7"/>
+  <g font-family="Arial, sans-serif" font-size="17" font-weight="700">
+    <line x1="585" y1="120" x2="640" y2="120" stroke="#3a7d8c" stroke-width="6"/><text x="655" y="126" fill="#315f68">Healthy control</text>
+    <line x1="585" y1="157" x2="640" y2="157" stroke="#c84b4b" stroke-width="7"/><text x="655" y="163" fill="#973737">After gastric surgery</text>
+  </g>
+  <rect x="580" y="355" width="255" height="82" rx="14" fill="#fff0f0" stroke="#c84b4b" stroke-width="2"/>
+  <text x="708" y="387" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#973737">Reactive hypoglycemia</text>
+  <text x="708" y="414" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#973737">after exaggerated insulin release</text>
+</svg>

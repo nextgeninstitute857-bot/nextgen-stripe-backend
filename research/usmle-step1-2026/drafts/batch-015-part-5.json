@@ -1,0 +1,309 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b015-in-chat-original-20-part-5",
+  "created_at": "2026-08-04T23:39:08+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "generation_method": "in_chat_original_generation_with_backend_coverage_signals_and_full_zip_lexical_screen",
+  "copyright_policy": {
+    "origin": "de_novo_from_current_public_medical_sources_and_private_coverage_signals",
+    "backend_export_used_for": "topic frequency and lexical similarity screening only",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_options_used": false,
+    "proprietary_qbank_explanations_used": false,
+    "proprietary_qbank_media_used": false,
+    "full_export_similarity_review_completed": true,
+    "human_semantic_review_required": true
+  },
+  "quality_controls": {
+    "distinct_learning_objectives": true,
+    "plausible_distractors_required": true,
+    "wrong_choice_explanations_required": true,
+    "authoritative_references_required": true,
+    "original_media_required": true,
+    "correct_answer_ids_server_side": true,
+    "publication_blocked": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-B015-REPRO-KLINEFELTER-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Male reproductive genetics",
+        "topic": "Klinefelter syndrome",
+        "subtopic": "Seminiferous tubular hyalinization and hypergonadotropic hypogonadism"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 29-year-old man is evaluated for infertility. He is tall with sparse facial hair, gynecomastia, and small firm testes. Semen analysis shows azoospermia; testosterone is low, and follicle-stimulating hormone and luteinizing hormone are elevated. Which testicular histology is most likely?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Normal seminiferous tubules with isolated obstruction of the vas deferens"
+        },
+        {
+          "id": 2,
+          "text_html": "Hyalinized fibrotic seminiferous tubules with marked germ-cell loss and relative Leydig-cell hyperplasia"
+        },
+        {
+          "id": 3,
+          "text_html": "Diffuse infiltration by malignant germ cells with Schiller-Duval bodies"
+        },
+        {
+          "id": 4,
+          "text_html": "Granulomatous destruction of the epididymis with preserved spermatogenesis"
+        },
+        {
+          "id": 5,
+          "text_html": "Proliferation of Sertoli cells forming Call-Exner bodies"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Klinefelter syndrome causes progressive seminiferous tubular hyalinization and fibrosis, loss of germ cells, and impaired inhibin B production. FSH rises because Sertoli-cell function is lost; Leydig-cell dysfunction lowers testosterone and raises LH. Residual or relatively increased Leydig cells may be present despite inadequate androgen output.</p>",
+      "wrong_choice_explanations": {
+        "1": "Congenital absence of the vas deferens causes obstructive azoospermia with normal testicular size and hormone production.",
+        "3": "Schiller-Duval bodies are seen in yolk-sac tumors.",
+        "4": "Granulomatous epididymal disease can obstruct sperm transport but does not produce the characteristic endocrine pattern and small firm testes.",
+        "5": "Call-Exner bodies are associated with ovarian granulosa-cell tumors."
+      },
+      "educational_objective": "Relate the Klinefelter phenotype and hypergonadotropic hypogonadism to seminiferous tubular hyalinization, germ-cell loss, and Leydig-cell dysfunction.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/klinefelter-seminiferous-hyalinization.svg",
+          "placement": "question",
+          "type": "original_vector_testicular_histology",
+          "alt_text": "Relate the Klinefelter phenotype and hypergonadotropic hypogonadism to seminiferous tubular hyalinization, germ-cell loss, and Leydig-cell dysfunction.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Klinefelter Syndrome. StatPearls. NCBI Bookshelf. Updated 2025. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK482314/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-GEN-DOWN-ROB-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Cytogenetics",
+        "topic": "Robertsonian translocation Down syndrome",
+        "subtopic": "Meiotic segregation in a balanced rob(14;21) carrier"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A phenotypically healthy 27-year-old woman is found to have the karyotype 45,XX,rob(14;21)(q10;q10) after giving birth to a child with Down syndrome. Her partner has a normal karyotype. Which maternal gamete can produce a viable child with translocation trisomy 21 after fertilization by a normal paternal gamete?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "A gamete containing only the derivative rob(14;21) chromosome"
+        },
+        {
+          "id": 2,
+          "text_html": "A gamete containing one normal chromosome 14 and one normal chromosome 21"
+        },
+        {
+          "id": 3,
+          "text_html": "A gamete containing the derivative rob(14;21) chromosome plus one normal chromosome 21"
+        },
+        {
+          "id": 4,
+          "text_html": "A gamete containing the derivative chromosome plus one normal chromosome 14"
+        },
+        {
+          "id": 5,
+          "text_html": "A gamete containing neither chromosome 14 material nor chromosome 21 material"
+        }
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>The derivative chromosome contains one 14q and one 21q. A maternal gamete carrying the derivative plus a normal chromosome 21, when fertilized by a normal sperm carrying chromosomes 14 and 21, gives the conceptus two copies of 14q but three copies of 21q. The balanced carrier is healthy because the essential long-arm material is present in two copies despite a 45-chromosome count.</p>",
+      "wrong_choice_explanations": {
+        "1": "The derivative alone plus a normal paternal 14 and 21 produces balanced long-arm dosage, yielding a carrier rather than trisomy 21.",
+        "2": "A normal 14-plus-21 gamete produces a chromosomally normal child after fertilization by a normal gamete.",
+        "4": "The derivative plus a normal 14 creates excess 14q material and deficient 21q dosage rather than viable trisomy 21.",
+        "5": "Loss of both long-arm complements is not compatible with a viable conceptus."
+      },
+      "educational_objective": "Apply meiotic segregation of a balanced rob(14;21) carrier to identify the gamete that produces three copies of chromosome 21q.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/down-robertsonian-14-21.svg",
+          "placement": "question",
+          "type": "original_vector_cytogenetics",
+          "alt_text": "Apply meiotic segregation of a balanced rob(14;21) carrier to identify the gamete that produces three copies of chromosome 21q.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Genetics, Chromosome Abnormalities. StatPearls. NCBI Bookshelf. Updated 2026. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK557691/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-GU-PROSTATE-BONE-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Male reproductive oncology",
+        "topic": "Metastatic prostate adenocarcinoma",
+        "subtopic": "Osteoblastic skeletal metastases and elevated alkaline phosphatase"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 72-year-old man has urinary hesitancy, weight loss, and persistent low-back pain that awakens him at night. Prostate-specific antigen is markedly elevated. Imaging shows multiple dense sclerotic lesions in the lumbar spine and pelvis, and serum alkaline phosphatase is increased. Which local skeletal response best explains the radiographic appearance?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Exclusive osteoclast activation with complete suppression of bone formation"
+        },
+        {
+          "id": 2,
+          "text_html": "Deposition of monoclonal immunoglobulin light chains in marrow"
+        },
+        {
+          "id": 3,
+          "text_html": "Direct replacement of bone by keratinizing squamous epithelium"
+        },
+        {
+          "id": 4,
+          "text_html": "Tumor-driven osteoblast activation and disorganized new bone formation"
+        },
+        {
+          "id": 5,
+          "text_html": "Failure of osteoid mineralization from vitamin D deficiency"
+        }
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>Prostate adenocarcinoma classically produces osteoblastic-predominant bone metastases. Tumor-bone signaling stimulates osteoblast activity and reactive new bone formation, creating sclerotic lesions and often elevating alkaline phosphatase. The lesions can still contain osteoclastic activity and remain structurally weak.</p>",
+      "wrong_choice_explanations": {
+        "1": "Pure osteolysis is more typical of renal, thyroid, and many lung metastases; prostate lesions are predominantly osteoblastic.",
+        "2": "Light-chain deposition and lytic lesions suggest plasma-cell myeloma.",
+        "3": "Prostate adenocarcinoma remains gland-forming and does not create sclerosis by becoming squamous epithelium.",
+        "5": "Osteomalacia produces diffuse undermineralization rather than focal sclerotic metastases."
+      },
+      "educational_objective": "Recognize prostate-cancer skeletal metastases as osteoblastic-predominant lesions produced by tumor-stimulated new bone formation.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/prostate-osteoblastic-metastases.svg",
+          "placement": "question",
+          "type": "original_vector_bone_metastasis",
+          "alt_text": "Recognize prostate-cancer skeletal metastases as osteoblastic-predominant lesions produced by tumor-stimulated new bone formation.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Bone Metastasis. StatPearls. NCBI Bookshelf. Updated July 31, 2023. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK507911/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-HEME-WARFARIN-NECROSIS-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Anticoagulant pharmacology",
+        "topic": "Warfarin-induced skin necrosis",
+        "subtopic": "Rapid protein C depletion and transient microvascular thrombosis"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 43-year-old woman with an acute proximal deep-vein thrombosis is started on a large loading dose of warfarin without heparin. On day 4, painful erythematous plaques develop over the breasts and thighs and become purpuric with central necrosis. Which mechanism most directly caused this complication?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Antibodies against platelet factor 4 triggered widespread platelet-rich arterial thrombosis"
+        },
+        {
+          "id": 2,
+          "text_html": "Cholesterol crystals embolized from an ulcerated aortic plaque"
+        },
+        {
+          "id": 3,
+          "text_html": "Warfarin directly injured keratinocyte mitochondria in adipose-rich skin"
+        },
+        {
+          "id": 4,
+          "text_html": "Calcium-phosphate deposition occluded dermal arterioles because of secondary hyperparathyroidism"
+        },
+        {
+          "id": 5,
+          "text_html": "Protein C activity fell before procoagulant factors were depleted, creating transient hypercoagulability and dermal microvascular thrombosis"
+        }
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>Protein C has a short half-life and declines rapidly after vitamin K antagonism. If warfarin is started without an effective parenteral anticoagulant, the early fall in protein C can transiently outweigh depletion of factors II, IX, and X. Dermal venular and capillary microthrombi then cause painful necrosis, especially in adipose-rich areas and in patients with inherited protein C or S deficiency.</p>",
+      "wrong_choice_explanations": {
+        "1": "Platelet factor 4 antibodies cause heparin-induced thrombocytopenia and require heparin exposure.",
+        "2": "Cholesterol embolization causes livedo, blue toes, eosinophilia, and renal injury rather than the characteristic early warfarin lesion.",
+        "3": "The injury is thrombotic rather than a direct mitochondrial toxicity.",
+        "4": "Calciphylaxis occurs most often with severe kidney disease and mineral-bone abnormalities, not specifically within days of unbridged warfarin initiation."
+      },
+      "educational_objective": "Explain early warfarin skin necrosis through rapid depletion of protein C, transient hypercoagulability, and dermal microvascular thrombosis.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/warfarin-protein-c-skin-necrosis.svg",
+          "placement": "question",
+          "type": "original_vector_coagulation_timeline",
+          "alt_text": "Explain early warfarin skin necrosis through rapid depletion of protein C, transient hypercoagulability, and dermal microvascular thrombosis.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Warfarin. StatPearls. NCBI Bookshelf. Updated October 5, 2024. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK470313/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

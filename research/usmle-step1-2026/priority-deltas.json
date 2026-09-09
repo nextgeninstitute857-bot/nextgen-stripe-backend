@@ -1,0 +1,284 @@
+{
+  "schema_version": "aylamed-usmle-step1-priority-deltas-v1",
+  "exam_track": "usmle-step-1",
+  "curriculum_version": "2026.1-research",
+  "status": "private_research_seed",
+  "source_precedence": [
+    "current_2026_authoritative_public_material",
+    "verified_2026_private_coverage_signal",
+    "verified_2025_coverage_fallback",
+    "verified_2024_or_older_fallback_when_still_current"
+  ],
+  "rules": {
+    "newer_year_does_not_override_medical_accuracy": true,
+    "broken_media_never_beats_verified_older_media": true,
+    "social_signal_requires_authoritative_confirmation": true,
+    "all_generated_questions_remain_private_until_clinician_review": true
+  },
+  "priorities": [
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Multisystem Processes & Disorders",
+      "subsystem": "Nutrition and metabolic health",
+      "topic": "Nutrition assessment",
+      "subtopic": "Diet history, anthropometry, laboratory assessment, and malnutrition recognition",
+      "learning_objective": "Interpret a brief diet history, weight trajectory, anthropometric measurements, and selected laboratory findings to identify nutritional risk while recognizing that serum albumin is affected by inflammation.",
+      "media_required": true,
+      "media_types": ["weight_trajectory_chart", "anthropometry_table"],
+      "target_drafts": 4
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Multisystem Processes & Disorders",
+      "subsystem": "Nutrition and metabolic health",
+      "topic": "Refeeding physiology",
+      "subtopic": "Insulin-driven intracellular electrolyte shifts",
+      "learning_objective": "Explain hypophosphatemia, hypokalemia, and hypomagnesemia after carbohydrate reintroduction in a severely malnourished patient.",
+      "media_required": true,
+      "media_types": ["electrolyte_timeline_graph", "cellular_shift_schematic"],
+      "target_drafts": 4
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Blood & Lymphoreticular/Immune Systems",
+      "subsystem": "Anemia",
+      "topic": "Nutritional anemia",
+      "subtopic": "Iron deficiency versus inflammation-mediated iron restriction",
+      "learning_objective": "Differentiate iron deficiency anemia from anemia of chronic inflammation using ferritin, serum iron, total iron-binding capacity, and transferrin saturation.",
+      "media_required": true,
+      "media_types": ["iron_studies_table", "peripheral_smear_schematic"],
+      "target_drafts": 5
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Blood & Lymphoreticular/Immune Systems",
+      "subsystem": "Anemia",
+      "topic": "Megaloblastic anemia",
+      "subtopic": "Vitamin B12 versus folate deficiency",
+      "learning_objective": "Use methylmalonic acid, homocysteine, neurologic findings, and absorption anatomy to distinguish cobalamin deficiency from folate deficiency.",
+      "media_required": true,
+      "media_types": ["one_carbon_pathway_diagram", "peripheral_smear_schematic"],
+      "target_drafts": 5
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Nervous System & Special Senses",
+      "subsystem": "Metabolic and nutritional neurologic disorders",
+      "topic": "Thiamine deficiency",
+      "subtopic": "Failure of oxidative glucose metabolism",
+      "learning_objective": "Connect thiamine-dependent enzymes with Wernicke encephalopathy, lactic acidosis, and cardiac dysfunction.",
+      "media_required": true,
+      "media_types": ["metabolic_pathway_diagram", "brain_region_schematic"],
+      "target_drafts": 4
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Gastrointestinal System",
+      "subsystem": "Malabsorption and altered anatomy",
+      "topic": "Post-bariatric nutrient deficiency",
+      "subtopic": "Roux-en-Y gastric bypass and micronutrient absorption",
+      "learning_objective": "Predict iron, calcium, vitamin B12, or fat-soluble vitamin deficiencies from altered gastrointestinal anatomy and physiology.",
+      "media_required": true,
+      "media_types": ["original_postoperative_anatomy_schematic"],
+      "target_drafts": 5
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Gastrointestinal System",
+      "subsystem": "Postprandial physiology",
+      "topic": "Dumping syndrome",
+      "subtopic": "Rapid delivery of hyperosmolar contents to small intestine",
+      "learning_objective": "Explain early vasomotor symptoms and late hypoglycemia after gastric surgery using osmotic fluid shifts and exaggerated insulin release.",
+      "media_required": true,
+      "media_types": ["postprandial_glucose_curve", "gastric_emptying_schematic"],
+      "target_drafts": 3
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Pregnancy, Childbirth, & the Puerperium",
+      "subsystem": "Maternal nutrition",
+      "topic": "Micronutrients in pregnancy",
+      "subtopic": "Folate, iron, iodine, and vitamin A physiology",
+      "learning_objective": "Relate maternal micronutrient status to neural tube formation, thyroid development, erythropoiesis, and teratogenic risk.",
+      "media_required": true,
+      "media_types": ["embryologic_timeline", "maternal_fetal_pathway_diagram"],
+      "target_drafts": 5
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Human Development",
+      "subsystem": "Infancy and childhood",
+      "topic": "Growth and nutrition",
+      "subtopic": "Weight faltering and growth-pattern interpretation",
+      "learning_objective": "Interpret longitudinal weight, length, and head-circumference data and distinguish inadequate intake from endocrine or genetic growth patterns.",
+      "media_required": true,
+      "media_types": ["original_growth_chart"],
+      "target_drafts": 4
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Endocrine System",
+      "subsystem": "Energy balance",
+      "topic": "Obesity pathophysiology",
+      "subtopic": "Leptin, ghrelin, hypothalamic signaling, and insulin resistance",
+      "learning_objective": "Interpret hormonal and hypothalamic responses to fasting, weight loss, and adiposity.",
+      "media_required": true,
+      "media_types": ["hypothalamic_circuit_diagram", "hormone_time_curve"],
+      "target_drafts": 5
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Cardiovascular System",
+      "subsystem": "Cardiometabolic disease",
+      "topic": "Diet-related vascular risk",
+      "subtopic": "Lipoprotein metabolism and atherogenesis",
+      "learning_objective": "Connect dietary lipid handling, apolipoproteins, LDL receptor function, and foam-cell formation.",
+      "media_required": true,
+      "media_types": ["lipoprotein_pathway_diagram", "arterial_wall_schematic"],
+      "target_drafts": 5
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Renal & Urinary System",
+      "subsystem": "Mineral and bone metabolism",
+      "topic": "Chronic kidney disease nutrition physiology",
+      "subtopic": "Phosphate retention, calcitriol deficiency, and secondary hyperparathyroidism",
+      "learning_objective": "Interpret calcium, phosphate, parathyroid hormone, and vitamin D patterns in chronic kidney disease.",
+      "media_required": true,
+      "media_types": ["hormone_feedback_diagram", "laboratory_trend_table"],
+      "target_drafts": 4
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Social Sciences",
+      "subsystem": "Health equity and access",
+      "topic": "Food and nutrition insecurity",
+      "subtopic": "Screening, nonjudgmental communication, and referral",
+      "learning_objective": "Select a respectful, actionable response when a patient screens positive for food insecurity while avoiding assumptions and blame.",
+      "media_required": false,
+      "media_types": [],
+      "target_drafts": 4
+    },
+    {
+      "priority": "confirmed_2026_enhancement",
+      "system": "Social Sciences",
+      "subsystem": "Communication and interpersonal skills",
+      "topic": "Culturally responsive nutrition counseling",
+      "subtopic": "Shared decision-making and practical dietary recommendations",
+      "learning_objective": "Choose communication that elicits the patient's dietary practices, goals, resources, and preferences before offering evidence-based advice.",
+      "media_required": false,
+      "media_types": [],
+      "target_drafts": 4
+    },
+    {
+      "priority": "explicit_2026_outline_population",
+      "system": "Behavioral Health",
+      "subsystem": "Trauma- and stressor-related disorders",
+      "topic": "Military and veteran mental health",
+      "subtopic": "Post-traumatic stress disorder and comorbidity",
+      "learning_objective": "Recognize PTSD mechanisms and symptom clusters while distinguishing them from acute stress disorder, traumatic brain injury, depression, and substance use.",
+      "media_required": false,
+      "media_types": [],
+      "target_drafts": 4
+    },
+    {
+      "priority": "explicit_2026_outline_population",
+      "system": "Nervous System & Special Senses",
+      "subsystem": "Hearing disorders",
+      "topic": "Noise-induced hearing loss",
+      "subtopic": "Acoustic trauma in military or occupational exposure",
+      "learning_objective": "Interpret an audiogram with a high-frequency noise notch and relate it to cochlear outer hair-cell injury.",
+      "media_required": true,
+      "media_types": ["original_audiogram"],
+      "target_drafts": 3
+    },
+    {
+      "priority": "explicit_2026_outline_population",
+      "system": "Nervous System & Special Senses",
+      "subsystem": "Spinal cord disorders",
+      "topic": "Disability-related secondary complications",
+      "subtopic": "Autonomic dysreflexia after high spinal cord injury",
+      "learning_objective": "Explain severe hypertension, reflex bradycardia, and sympathetic discharge below a spinal lesion after a noxious stimulus.",
+      "media_required": true,
+      "media_types": ["spinal_autonomic_circuit_schematic"],
+      "target_drafts": 4
+    },
+    {
+      "priority": "explicit_2026_outline_population",
+      "system": "Skin & Subcutaneous Tissue",
+      "subsystem": "Mechanical and pressure injury",
+      "topic": "Pressure injury",
+      "subtopic": "Immobility, tissue ischemia, and prevention in patients with disabilities",
+      "learning_objective": "Identify pressure-related tissue ischemia and select the mechanism explaining injury over bony prominences.",
+      "media_required": true,
+      "media_types": ["pressure_distribution_schematic", "staging_diagram_original"],
+      "target_drafts": 3
+    },
+    {
+      "priority": "explicit_2026_outline_population",
+      "system": "Endocrine System",
+      "subsystem": "Sex steroid physiology",
+      "topic": "Gender-affirming hormone therapy",
+      "subtopic": "Testosterone effects on erythropoiesis and reproductive physiology",
+      "learning_objective": "Relate exogenous testosterone to erythropoietin signaling, hematocrit change, gonadotropin suppression, and target-organ effects without pathologizing gender identity.",
+      "media_required": true,
+      "media_types": ["hypothalamic_pituitary_gonadal_axis_diagram"],
+      "target_drafts": 4
+    },
+    {
+      "priority": "explicit_2026_outline_population",
+      "system": "Cardiovascular System",
+      "subsystem": "Thromboembolic physiology",
+      "topic": "Estrogen-associated risk",
+      "subtopic": "Hepatic coagulation-factor changes with estrogen exposure",
+      "learning_objective": "Explain how estrogen exposure can alter hepatic coagulation protein synthesis and modify thromboembolic risk in susceptible patients.",
+      "media_required": false,
+      "media_types": [],
+      "target_drafts": 3
+    },
+    {
+      "priority": "explicit_2026_outline_population",
+      "system": "Human Development",
+      "subsystem": "Older adulthood",
+      "topic": "Normal aging and vulnerability",
+      "subtopic": "Body composition, renal clearance, thermoregulation, and medication sensitivity",
+      "learning_objective": "Distinguish normal age-related physiologic changes from disease and predict their effects on drug distribution and clearance.",
+      "media_required": true,
+      "media_types": ["age_pharmacokinetic_graph", "renal_function_curve"],
+      "target_drafts": 5
+    },
+    {
+      "priority": "explicit_2026_outline_population",
+      "system": "Multisystem Processes & Disorders",
+      "subsystem": "Adverse effects of therapy",
+      "topic": "Polypharmacy",
+      "subtopic": "Anticholinergic burden, falls, delirium, and drug-drug interactions",
+      "learning_objective": "Identify receptor-level and pharmacokinetic mechanisms by which multiple medications increase delirium and fall risk in older adults.",
+      "media_required": false,
+      "media_types": [],
+      "target_drafts": 5
+    },
+    {
+      "priority": "explicit_2026_outline_population",
+      "system": "Behavioral Health",
+      "subsystem": "Substance use disorders",
+      "topic": "Prescription-drug use",
+      "subtopic": "Opioid intoxication, withdrawal, tolerance, and treatment mechanisms",
+      "learning_objective": "Differentiate opioid receptor effects, tolerance, withdrawal physiology, naloxone reversal, and partial agonist therapy.",
+      "media_required": true,
+      "media_types": ["dose_response_curve", "receptor_occupancy_schematic"],
+      "target_drafts": 5
+    },
+    {
+      "priority": "official_media_emphasis",
+      "system": "Multisystem Processes & Disorders",
+      "subsystem": "Data interpretation",
+      "topic": "Graphic and tabular reasoning",
+      "subtopic": "Mechanism inference from curves, tables, gross specimens, and microscopy",
+      "learning_objective": "Infer a foundational mechanism from original visual data rather than merely naming a memorized diagnosis.",
+      "media_required": true,
+      "media_types": ["curve", "table", "gross_specimen_original_or_licensed", "microscopy_original_or_licensed"],
+      "target_drafts": 20
+    }
+  ]
+}

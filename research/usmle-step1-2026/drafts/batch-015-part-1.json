@@ -1,0 +1,309 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b015-in-chat-original-20-part-1",
+  "created_at": "2026-08-04T23:39:08+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "generation_method": "in_chat_original_generation_with_backend_coverage_signals_and_full_zip_lexical_screen",
+  "copyright_policy": {
+    "origin": "de_novo_from_current_public_medical_sources_and_private_coverage_signals",
+    "backend_export_used_for": "topic frequency and lexical similarity screening only",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_options_used": false,
+    "proprietary_qbank_explanations_used": false,
+    "proprietary_qbank_media_used": false,
+    "full_export_similarity_review_completed": true,
+    "human_semantic_review_required": true
+  },
+  "quality_controls": {
+    "distinct_learning_objectives": true,
+    "plausible_distractors_required": true,
+    "wrong_choice_explanations_required": true,
+    "authoritative_references_required": true,
+    "original_media_required": true,
+    "correct_answer_ids_server_side": true,
+    "publication_blocked": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-B015-CV-DCM-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Cardiomyopathy and ventricular remodeling",
+        "topic": "Dilated cardiomyopathy",
+        "subtopic": "Eccentric remodeling and sarcomeres added in series"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 39-year-old woman received doxorubicin for lymphoma 8 years ago. She now has progressive exertional dyspnea, orthopnea, a displaced diffuse apical impulse, and an S3. Coronary angiography shows no obstructive disease. Echocardiography demonstrates global hypokinesis, a markedly enlarged left ventricular cavity, and an ejection fraction of 24%. Which structural adaptation most directly accounts for the chamber geometry?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Addition of sarcomeres in series, producing elongated myocytes and eccentric ventricular remodeling"
+        },
+        {
+          "id": 2,
+          "text_html": "Addition of sarcomeres in parallel, producing disproportionate wall thickening and a small cavity"
+        },
+        {
+          "id": 3,
+          "text_html": "Disorganized branching myocytes separated by interstitial fibrosis, producing asymmetric septal hypertrophy"
+        },
+        {
+          "id": 4,
+          "text_html": "Extracellular deposition of misfolded fibrils, producing a stiff nondilated ventricle"
+        },
+        {
+          "id": 5,
+          "text_html": "Replacement of right ventricular myocardium by fibrofatty tissue"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Reduced contractility raises end-systolic and end-diastolic volumes. Chronic volume loading and remodeling lengthen cardiomyocytes by adding sarcomeres in series, enlarging the chamber and creating eccentric hypertrophy. This pattern contrasts with pressure-overload concentric hypertrophy, in which sarcomeres are added in parallel.</p>",
+      "wrong_choice_explanations": {
+        "2": "Sarcomeres added in parallel produce concentric hypertrophy, typical of chronic pressure overload such as aortic stenosis.",
+        "3": "Myofiber disarray and asymmetric septal hypertrophy are characteristic of hypertrophic cardiomyopathy.",
+        "4": "Amyloid deposition causes restrictive physiology with increased stiffness rather than a markedly dilated, globally hypokinetic chamber.",
+        "5": "Fibrofatty replacement of the right ventricle characterizes arrhythmogenic right ventricular cardiomyopathy."
+      },
+      "educational_objective": "Relate systolic failure in dilated cardiomyopathy to sarcomeres added in series, myocyte elongation, chamber dilation, and eccentric remodeling.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/dilated-cardiomyopathy-eccentric-remodeling.svg",
+          "placement": "question",
+          "type": "original_vector_remodeling",
+          "alt_text": "Relate systolic failure in dilated cardiomyopathy to sarcomeres added in series, myocyte elongation, chamber dilation, and eccentric remodeling.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "academic_reference",
+          "citation": "Pathophysiology. In: Dilated Cardiomyopathy: From Genetics to Clinical Management. NCBI Bookshelf. 2019. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK553848/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-NEURO-GBM-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Primary central nervous system tumors",
+        "topic": "Glioblastoma",
+        "subtopic": "Pseudopalisading necrosis, hypoxia, and VEGF-driven microvascular proliferation"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 63-year-old man develops progressive confusion, left-sided weakness, and morning headaches. MRI shows an irregular heterogeneously enhancing mass that crosses the splenium of the corpus callosum. Biopsy reveals necrotic foci surrounded by densely packed tumor cells and adjacent glomeruloid microvascular proliferation. Which signaling response most directly links the necrotic zones to the vascular finding?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Loss of merlin causes arachnoid-cell whorl formation"
+        },
+        {
+          "id": 2,
+          "text_html": "Hypoxia stabilizes HIF-1α and increases VEGF expression by tumor cells"
+        },
+        {
+          "id": 3,
+          "text_html": "IDH-mediated production of 2-hydroxyglutarate directly calcifies tumor vessels"
+        },
+        {
+          "id": 4,
+          "text_html": "Activation of sonic hedgehog signaling expands external granular-layer precursors"
+        },
+        {
+          "id": 5,
+          "text_html": "Antibodies against aquaporin-4 recruit complement to perivascular astrocytes"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Vascular occlusion and rapid tumor growth create severe regional hypoxia. Cells forming pseudopalisades around necrosis stabilize HIF-1α and secrete VEGF and other proangiogenic mediators. The resulting endothelial proliferation produces the characteristic glomeruloid microvasculature of glioblastoma.</p>",
+      "wrong_choice_explanations": {
+        "1": "Merlin loss and cellular whorls are associated with meningioma and neurofibromatosis type 2, not pseudopalisading glioblastoma.",
+        "3": "IDH mutations define many lower-grade diffuse gliomas and secondary glioblastomas, but 2-hydroxyglutarate does not directly produce glomeruloid vascular proliferation.",
+        "4": "Sonic hedgehog signaling is central to a subset of medulloblastomas arising from cerebellar granule-cell precursors.",
+        "5": "Aquaporin-4 autoimmunity causes neuromyelitis optica rather than a necrotic infiltrating tumor."
+      },
+      "educational_objective": "Connect glioblastoma pseudopalisading necrosis to hypoxia-induced HIF-1α stabilization, VEGF secretion, and microvascular proliferation.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/glioblastoma-hypoxia-pseudopalisading-vegf.svg",
+          "placement": "question",
+          "type": "original_vector_tumor_microenvironment",
+          "alt_text": "Connect glioblastoma pseudopalisading necrosis to hypoxia-induced HIF-1α stabilization, VEGF secretion, and microvascular proliferation.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "peer_reviewed_review",
+          "citation": "Rong Y, Durden DL, Van Meir EG, Brat DJ. 'Pseudopalisading' necrosis in glioblastoma: a familiar morphologic feature that links vascular pathology, hypoxia, and angiogenesis. J Neuropathol Exp Neurol. 2006;65:529-539.",
+          "url": "https://pubmed.ncbi.nlm.nih.gov/16783163/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-NEURO-MENINGIOMA-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Primary central nervous system tumors",
+        "topic": "Meningioma",
+        "subtopic": "Arachnoid cap-cell origin, whorls, and psammoma bodies"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 54-year-old woman is evaluated after a focal seizure. MRI shows a sharply circumscribed extra-axial mass attached to the falx with a broad dural base and internal calcifications. Histology demonstrates uniform polygonal cells arranged in whorls around laminated calcified bodies. From which cell type did this neoplasm most likely arise?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Ependymal cells lining the ventricular system"
+        },
+        {
+          "id": 2,
+          "text_html": "Schwann cells surrounding cranial nerve axons"
+        },
+        {
+          "id": 3,
+          "text_html": "Arachnoid cap cells of the meninges"
+        },
+        {
+          "id": 4,
+          "text_html": "Oligodendrocytes forming central nervous system myelin"
+        },
+        {
+          "id": 5,
+          "text_html": "Choroid plexus epithelial cells"
+        }
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>Meningiomas arise from meningothelial arachnoid cap cells. Their extra-axial dural attachment, cellular whorls, and laminated psammoma bodies are characteristic. Calcification on imaging can reflect abundant psammoma bodies.</p>",
+      "wrong_choice_explanations": {
+        "1": "Ependymal cells give rise to ependymomas, which are usually intraventricular and may form perivascular pseudorosettes.",
+        "2": "Schwann cells give rise to schwannomas, commonly involving cranial nerves and showing Antoni A/B areas and Verocay bodies.",
+        "4": "Oligodendroglial tumors are intra-axial infiltrating gliomas rather than dural-based masses.",
+        "5": "Choroid plexus tumors arise within ventricles and form papillary fronds."
+      },
+      "educational_objective": "Identify a dural-based whorled tumor with psammoma bodies as a meningioma derived from arachnoid cap cells.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/meningioma-arachnoid-whorls-psammoma.svg",
+          "placement": "question",
+          "type": "original_vector_histology_anatomy",
+          "alt_text": "Identify a dural-based whorled tumor with psammoma bodies as a meningioma derived from arachnoid cap cells.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Meningioma. StatPearls. NCBI Bookshelf. Updated August 23, 2023. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK560538/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-GI-PSC-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Cholestatic and biliary disease",
+        "topic": "Primary sclerosing cholangitis",
+        "subtopic": "Multifocal strictures and concentric periductal fibrosis"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 36-year-old man with a 9-year history of ulcerative colitis has fatigue, pruritus, and an alkaline phosphatase concentration three times the upper limit of normal. Magnetic resonance cholangiopancreatography shows alternating short strictures and mildly dilated segments in both intrahepatic and extrahepatic ducts. Which histopathologic change best explains the progressive duct narrowing?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Granulomatous destruction of small intrahepatic ducts with antimitochondrial antibodies"
+        },
+        {
+          "id": 2,
+          "text_html": "Massive hepatocellular copper deposition with Mallory-Denk bodies"
+        },
+        {
+          "id": 3,
+          "text_html": "Plasma-cell-rich interface hepatitis with rosette formation"
+        },
+        {
+          "id": 4,
+          "text_html": "Concentric periductal fibrosis that gradually obliterates affected bile ducts"
+        },
+        {
+          "id": 5,
+          "text_html": "Caseating granulomas containing acid-fast bacilli"
+        }
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>Primary sclerosing cholangitis causes chronic inflammation and concentric periductal fibrosis, classically described as onion-skinning. Patchy fibrosis produces multifocal strictures separated by normal or dilated segments, creating the beaded cholangiographic appearance. The strong association with inflammatory bowel disease, especially ulcerative colitis, supports the diagnosis.</p>",
+      "wrong_choice_explanations": {
+        "1": "Destructive small-duct cholangitis with antimitochondrial antibodies is characteristic of primary biliary cholangitis.",
+        "2": "Copper accumulation and Mallory-Denk bodies may occur in Wilson disease or advanced cholestasis but do not produce the primary beaded duct lesion.",
+        "3": "Interface hepatitis with plasma cells and rosettes suggests autoimmune hepatitis.",
+        "5": "Tuberculous granulomas are not the typical cause of multifocal intrahepatic and extrahepatic strictures in this setting."
+      },
+      "educational_objective": "Recognize primary sclerosing cholangitis by ulcerative colitis, cholestasis, beaded ducts, and concentric periductal fibrosis.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/psc-beading-onion-skin.svg",
+          "placement": "question",
+          "type": "original_vector_cholangiography_histology",
+          "alt_text": "Recognize primary sclerosing cholangitis by ulcerative colitis, cholestasis, beaded ducts, and concentric periductal fibrosis.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "academic_reference",
+          "citation": "Primary sclerosing cholangitis. Surgical Treatment. NCBI Bookshelf. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK6949/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

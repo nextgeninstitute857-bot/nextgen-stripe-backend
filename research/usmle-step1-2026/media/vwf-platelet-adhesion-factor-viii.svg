@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 930 520" role="img" aria-labelledby="title desc">
+<title id="title">Von Willebrand factor functions</title><desc id="desc">VWF bridges exposed collagen to platelet glycoprotein Ib and carries factor VIII in plasma.</desc>
+<rect width="930" height="520" fill="#ffffff"/>
+<text x="40" y="44" font-family="Arial" font-size="28" font-weight="700">Two linked functions of von Willebrand factor</text>
+<rect x="45" y="105" width="840" height="90" fill="#fde68a" stroke="#92400e" stroke-width="4"/>
+<text x="70" y="155" font-family="Arial" font-size="20">Exposed subendothelial collagen after vessel injury</text>
+<path d="M180 195 C220 245 255 245 300 195" fill="none" stroke="#7c3aed" stroke-width="10"/>
+<path d="M300 195 C345 245 380 245 425 195" fill="none" stroke="#7c3aed" stroke-width="10"/>
+<text x="265" y="275" font-family="Arial" font-size="19" font-weight="700">VWF multimer</text>
+<ellipse cx="360" cy="355" rx="110" ry="60" fill="#bfdbfe" stroke="#1e3a8a" stroke-width="5"/>
+<text x="305" y="350" font-family="Arial" font-size="20">Platelet</text><text x="302" y="380" font-family="Arial" font-size="18">GPIb receptor</text>
+<line x1="360" y1="295" x2="360" y2="245" stroke="#111827" stroke-width="5"/>
+<rect x="620" y="270" width="210" height="120" rx="20" fill="#dcfce7" stroke="#166534" stroke-width="4"/>
+<text x="675" y="315" font-family="Arial" font-size="24" font-weight="700">Factor VIII</text>
+<text x="650" y="350" font-family="Arial" font-size="18">bound and stabilized</text>
+<path d="M540 245 C590 250 590 320 620 330" fill="none" stroke="#7c3aed" stroke-width="8"/>
+<text x="525" y="215" font-family="Arial" font-size="18">circulating VWF</text>
+</svg>

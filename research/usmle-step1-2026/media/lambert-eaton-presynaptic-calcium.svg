@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+<title id="title">Lambert–Eaton syndrome — original AylaMed teaching diagram</title>
+<desc id="desc">Antibody blocks presynaptic P/Q Ca²⁺ channels. Reduced ACh release; facilitation with use.</desc>
+<style>
+.bg{fill:#f7f9fc}.panel{fill:#fff;stroke:#26364a;stroke-width:2}.accent{fill:#e9f1ff;stroke:#315a8b;stroke-width:2}
+.title{font:700 34px Arial;fill:#172536}.subtitle{font:700 21px Arial;fill:#315a8b}.body{font:18px Arial;fill:#172536}.small{font:600 15px Arial;fill:#5a6675}
+</style>
+<rect width="1200" height="720" class="bg"/>
+<rect x="30" y="30" width="1140" height="660" rx="28" class="panel"/>
+<text x="70" y="90" class="title">Lambert–Eaton syndrome</text>
+<text x="70" y="135" class="small">Original mechanism-focused Step 1 teaching graphic</text>
+<rect x="70" y="180" width="310" height="390" rx="24" class="accent"/>
+<rect x="120" y="230" width="210" height="220" rx="30" fill="#dce9f8" stroke="#315a8b" stroke-width="5"/><path d="M225 230 V450" stroke="#a13d3d" stroke-width="15"/><g font-family="Arial" font-size="22" font-weight="700" fill="#315a8b"><text x="145" y="290">Ca²⁺</text><text x="270" y="405">ACh</text></g><path d="M150 345 H300" stroke="#315a8b" stroke-width="5" stroke-dasharray="12 8"/>
+<rect x="420" y="180" width="330" height="390" rx="24" class="panel"/>
+<text x="470" y="230" class="subtitle">Mechanism</text><text x="470" y="285" class="body">Antibody blocks</text><text x="470" y="319" class="body">presynaptic P/Q Ca²⁺</text><text x="470" y="353" class="body">channels</text>
+<path d="M755 375 H805" stroke="#315a8b" stroke-width="7"/><path d="M805 375 l-20 -14 v28 z" fill="#315a8b"/>
+<rect x="820" y="180" width="310" height="390" rx="24" class="panel"/>
+<text x="840" y="230" class="subtitle">Key inference</text><text x="840" y="285" class="body">Reduced ACh release;</text><text x="840" y="319" class="body">facilitation with use</text>
+<text x="600" y="645" text-anchor="middle" class="small">AylaMed original SVG — private research draft — publication blocked</text>
+</svg>

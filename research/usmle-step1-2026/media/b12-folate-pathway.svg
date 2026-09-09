@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620" role="img" aria-labelledby="title desc">
+  <title id="title">Vitamin B12 dependent metabolic reactions</title>
+  <desc id="desc">Original pathway diagram showing methylmalonyl-CoA conversion to succinyl-CoA and homocysteine conversion to methionine as vitamin B12 dependent reactions.</desc>
+  <rect width="1000" height="620" fill="#ffffff"/>
+  <text x="500" y="48" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#173f4c">Vitamin B12-dependent reactions</text>
+  <rect x="70" y="115" width="300" height="92" rx="18" fill="#e8f5f7" stroke="#167989" stroke-width="3"/>
+  <text x="220" y="155" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#173f4c">Methylmalonyl-CoA</text>
+  <text x="220" y="184" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#365e68">from odd-chain fatty acids and amino acids</text>
+  <line x1="370" y1="161" x2="625" y2="161" stroke="#2b6f7b" stroke-width="5" marker-end="url(#arrow)"/>
+  <rect x="416" y="102" width="170" height="42" rx="12" fill="#fff5d8" stroke="#c18400" stroke-width="2"/>
+  <text x="501" y="129" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#7a5200">B12 cofactor</text>
+  <text x="500" y="190" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#365e68">methylmalonyl-CoA mutase</text>
+  <rect x="630" y="115" width="300" height="92" rx="18" fill="#e9f7ed" stroke="#2d8a4e" stroke-width="3"/>
+  <text x="780" y="155" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#1e5934">Succinyl-CoA</text>
+  <text x="780" y="184" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#3d6d4d">enters the citric acid cycle</text>
+
+  <rect x="70" y="340" width="300" height="92" rx="18" fill="#f4eefb" stroke="#7652a8" stroke-width="3"/>
+  <text x="220" y="380" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#4d3670">Homocysteine</text>
+  <text x="220" y="409" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#655378">receives a methyl group</text>
+  <line x1="370" y1="386" x2="625" y2="386" stroke="#654a85" stroke-width="5" marker-end="url(#arrow2)"/>
+  <rect x="406" y="318" width="190" height="46" rx="12" fill="#fff5d8" stroke="#c18400" stroke-width="2"/>
+  <text x="501" y="347" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#7a5200">B12 + methyl-THF</text>
+  <text x="500" y="420" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#655378">methionine synthase</text>
+  <rect x="630" y="340" width="300" height="92" rx="18" fill="#e9f7ed" stroke="#2d8a4e" stroke-width="3"/>
+  <text x="780" y="380" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#1e5934">Methionine</text>
+  <text x="780" y="409" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#3d6d4d">supports methylation reactions</text>
+
+  <rect x="220" y="500" width="560" height="76" rx="16" fill="#fff0f0" stroke="#c74646" stroke-width="2"/>
+  <text x="500" y="530" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#8d2e2e">Vitamin B12 deficiency</text>
+  <text x="500" y="558" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" fill="#8d2e2e">Methylmalonic acid ↑ and homocysteine ↑</text>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#2b6f7b"/></marker>
+    <marker id="arrow2" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#654a85"/></marker>
+  </defs>
+</svg>

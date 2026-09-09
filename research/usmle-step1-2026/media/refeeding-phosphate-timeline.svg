@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="540" viewBox="0 0 900 540" role="img" aria-labelledby="title desc">
+  <title id="title">Serum phosphate after refeeding begins</title>
+  <desc id="desc">An original line graph showing serum phosphate falling from 3.2 milligrams per deciliter at baseline to 0.8 at 24 hours after carbohydrate feeding starts.</desc>
+  <rect width="900" height="540" fill="#ffffff"/>
+  <text x="450" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="26" font-weight="700" fill="#143d4a">Serum phosphate after carbohydrate refeeding</text>
+  <line x1="105" y1="455" x2="835" y2="455" stroke="#284b55" stroke-width="3"/>
+  <line x1="105" y1="90" x2="105" y2="455" stroke="#284b55" stroke-width="3"/>
+  <g font-family="Arial, sans-serif" font-size="17" fill="#284b55">
+    <text x="105" y="490" text-anchor="middle">0</text>
+    <text x="280" y="490" text-anchor="middle">6</text>
+    <text x="455" y="490" text-anchor="middle">12</text>
+    <text x="630" y="490" text-anchor="middle">18</text>
+    <text x="805" y="490" text-anchor="middle">24</text>
+    <text x="455" y="525" text-anchor="middle">Hours after feeding begins</text>
+    <text transform="translate(32 280) rotate(-90)" text-anchor="middle">Serum phosphate (mg/dL)</text>
+    <text x="82" y="460" text-anchor="end">0</text>
+    <text x="82" y="370" text-anchor="end">1</text>
+    <text x="82" y="280" text-anchor="end">2</text>
+    <text x="82" y="190" text-anchor="end">3</text>
+    <text x="82" y="100" text-anchor="end">4</text>
+  </g>
+  <g stroke="#d7e5e8" stroke-width="1">
+    <line x1="105" y1="365" x2="835" y2="365"/>
+    <line x1="105" y1="275" x2="835" y2="275"/>
+    <line x1="105" y1="185" x2="835" y2="185"/>
+    <line x1="105" y1="95" x2="835" y2="95"/>
+  </g>
+  <polyline points="105,167 280,212 455,302 630,365 805,383" fill="none" stroke="#087f8c" stroke-width="7" stroke-linejoin="round" stroke-linecap="round"/>
+  <g fill="#087f8c" stroke="#ffffff" stroke-width="4">
+    <circle cx="105" cy="167" r="9"/><circle cx="280" cy="212" r="9"/><circle cx="455" cy="302" r="9"/><circle cx="630" cy="365" r="9"/><circle cx="805" cy="383" r="9"/>
+  </g>
+  <line x1="105" y1="80" x2="105" y2="455" stroke="#d97706" stroke-width="3" stroke-dasharray="9 8"/>
+  <text x="122" y="118" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#a55405">Feeding started</text>
+  <rect x="630" y="118" width="190" height="70" rx="12" fill="#fff4e5" stroke="#d97706" stroke-width="2"/>
+  <text x="725" y="146" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#7c3c00">24-hour value</text>
+  <text x="725" y="174" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#7c3c00">0.8 mg/dL</text>
+</svg>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 520" role="img" aria-labelledby="title desc">
+<title id="title">CD40 ligand dependent immunoglobulin class switching</title><desc id="desc">Activated helper T cell uses CD40 ligand to signal a B cell, enabling germinal center formation and switching from IgM to IgG, IgA, or IgE.</desc>
+<rect width="940" height="520" fill="#ffffff"/>
+<text x="40" y="45" font-family="Arial" font-size="28" font-weight="700">T-cell help for B-cell class switching</text>
+<circle cx="210" cy="230" r="115" fill="#dbeafe" stroke="#1d4ed8" stroke-width="5"/>
+<text x="133" y="220" font-family="Arial" font-size="22" font-weight="700">Activated CD4</text><text x="160" y="252" font-family="Arial" font-size="20">helper T cell</text>
+<circle cx="690" cy="230" r="115" fill="#fce7f3" stroke="#be185d" stroke-width="5"/>
+<text x="650" y="220" font-family="Arial" font-size="24" font-weight="700">B cell</text><text x="628" y="252" font-family="Arial" font-size="18">initial IgM state</text>
+<rect x="318" y="180" width="120" height="55" rx="12" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="4"/><text x="337" y="215" font-family="Arial" font-size="20">CD40L</text>
+<rect x="502" y="180" width="120" height="55" rx="12" fill="#fbcfe8" stroke="#be185d" stroke-width="4"/><text x="530" y="215" font-family="Arial" font-size="20">CD40</text>
+<line x1="438" y1="207" x2="502" y2="207" stroke="#111827" stroke-width="6"/>
+<path d="M690 350 V405 H375" fill="none" stroke="#111827" stroke-width="5"/>
+<text x="400" y="390" font-family="Arial" font-size="18">germinal center + AID-dependent recombination</text>
+<g font-family="Arial" font-size="21" font-weight="700"><text x="350" y="462">IgG</text><text x="485" y="462">IgA</text><text x="620" y="462">IgE</text></g>
+<line x1="410" y1="430" x2="410" y2="445" stroke="#111827" stroke-width="4"/><line x1="545" y1="430" x2="545" y2="445" stroke="#111827" stroke-width="4"/><line x1="680" y1="430" x2="680" y2="445" stroke="#111827" stroke-width="4"/>
+</svg>

@@ -1,0 +1,309 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b015-in-chat-original-20-part-3",
+  "created_at": "2026-08-04T23:39:08+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "generation_method": "in_chat_original_generation_with_backend_coverage_signals_and_full_zip_lexical_screen",
+  "copyright_policy": {
+    "origin": "de_novo_from_current_public_medical_sources_and_private_coverage_signals",
+    "backend_export_used_for": "topic frequency and lexical similarity screening only",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_options_used": false,
+    "proprietary_qbank_explanations_used": false,
+    "proprietary_qbank_media_used": false,
+    "full_export_similarity_review_completed": true,
+    "human_semantic_review_required": true
+  },
+  "quality_controls": {
+    "distinct_learning_objectives": true,
+    "plausible_distractors_required": true,
+    "wrong_choice_explanations_required": true,
+    "authoritative_references_required": true,
+    "original_media_required": true,
+    "correct_answer_ids_server_side": true,
+    "publication_blocked": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-B015-ID-TETANUS-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neurotoxic bacterial disease",
+        "topic": "Tetanus",
+        "subtopic": "Synaptobrevin cleavage and loss of inhibitory neurotransmitter release"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 41-year-old farmer develops trismus, risus sardonicus, and painful generalized muscle spasms 10 days after a contaminated puncture wound. Sensory examination is normal. Which synaptic abnormality produces the spastic paralysis?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Blockade of postsynaptic glycine receptors in skeletal muscle"
+        },
+        {
+          "id": 2,
+          "text_html": "Antibodies against presynaptic P/Q-type calcium channels"
+        },
+        {
+          "id": 3,
+          "text_html": "Persistent acetylcholinesterase inhibition at neuromuscular junctions"
+        },
+        {
+          "id": 4,
+          "text_html": "Retrograde toxin transport followed by synaptobrevin cleavage in inhibitory interneurons, preventing GABA and glycine release"
+        },
+        {
+          "id": 5,
+          "text_html": "Cleavage of SNARE proteins at peripheral cholinergic terminals, preventing acetylcholine release"
+        }
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>Tetanospasmin enters motor terminals, travels retrogradely to the central nervous system, and reaches inhibitory interneurons. Its zinc-dependent protease cleaves synaptobrevin, blocking release of GABA and glycine. Loss of inhibitory control causes disinhibited motor-neuron firing, rigidity, and stimulus-induced spasms.</p>",
+      "wrong_choice_explanations": {
+        "1": "Tetanus reduces release of glycine and GABA from interneurons rather than directly antagonizing postsynaptic glycine receptors in muscle.",
+        "2": "Presynaptic calcium-channel antibodies cause Lambert-Eaton myasthenic syndrome and flaccid weakness.",
+        "3": "Acetylcholinesterase inhibition causes cholinergic excess, as in organophosphate poisoning.",
+        "5": "Peripheral blockade of acetylcholine release is the mechanism of botulism and causes descending flaccid paralysis."
+      },
+      "educational_objective": "Differentiate tetanus from other neuromuscular disorders by linking synaptobrevin cleavage in inhibitory interneurons to loss of GABA/glycine release and spastic paralysis.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/tetanus-synaptobrevin-inhibitory-block.svg",
+          "placement": "question",
+          "type": "original_vector_inhibitory_synapse",
+          "alt_text": "Differentiate tetanus from other neuromuscular disorders by linking synaptobrevin cleavage in inhibitory interneurons to loss of GABA/glycine release and spastic paralysis.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Tetanus (Clostridium tetani Infection). StatPearls. NCBI Bookshelf. Updated February 26, 2024. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK482484/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-ID-BOTULISM-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neuromuscular junction disorders",
+        "topic": "Botulism",
+        "subtopic": "SNARE proteolysis and failure of presynaptic acetylcholine release"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 44-year-old woman and her spouse develop diplopia, dysphagia, dry mouth, dilated pupils, and descending symmetric weakness after sharing home-canned vegetables. Sensation is intact. Which action of the responsible toxin best explains the paralysis?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Antagonism of postsynaptic nicotinic acetylcholine receptors"
+        },
+        {
+          "id": 2,
+          "text_html": "Destruction of anterior horn cells by viral replication"
+        },
+        {
+          "id": 3,
+          "text_html": "Blockade of acetylcholinesterase with accumulation of acetylcholine"
+        },
+        {
+          "id": 4,
+          "text_html": "Cleavage of synaptobrevin in central inhibitory interneurons"
+        },
+        {
+          "id": 5,
+          "text_html": "Zinc-dependent cleavage of SNARE proteins in peripheral cholinergic nerve terminals, preventing vesicle fusion"
+        }
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>Botulinum neurotoxin enters presynaptic cholinergic terminals and cleaves serotype-specific SNARE proteins such as SNAP-25, synaptobrevin, or syntaxin. Acetylcholine vesicles cannot fuse with the membrane, producing cranial neuropathies, autonomic dysfunction, and descending flaccid paralysis.</p>",
+      "wrong_choice_explanations": {
+        "1": "Postsynaptic nicotinic receptor blockade is pharmacologic curare-like paralysis, not botulism.",
+        "2": "Anterior horn-cell destruction is characteristic of poliomyelitis.",
+        "3": "Acetylcholinesterase inhibition causes excessive cholinergic signaling rather than dry, flaccid paralysis.",
+        "4": "Central inhibitory-neuron synaptobrevin cleavage is the mechanism of tetanus and causes spasticity."
+      },
+      "educational_objective": "Explain botulism as peripheral cholinergic paralysis caused by toxin-mediated SNARE cleavage and failure of acetylcholine vesicle fusion.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/botulism-snare-ach-block.svg",
+          "placement": "question",
+          "type": "original_vector_neuromuscular_toxin",
+          "alt_text": "Explain botulism as peripheral cholinergic paralysis caused by toxin-mediated SNARE cleavage and failure of acetylcholine vesicle fusion.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Botulism. StatPearls. NCBI Bookshelf. Updated November 25, 2024. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK459273/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-IMM-WAS-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Combined immunodeficiency",
+        "topic": "Wiskott-Aldrich syndrome",
+        "subtopic": "WASp-Arp2/3 actin remodeling at hematopoietic immune synapses"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 10-month-old boy has recurrent otitis, an eczematous rash, and petechiae. Platelet count is 24,000/mm³, and the mean platelet volume is markedly below the age-adjusted range. Two maternal uncles died of infections in childhood. Which cellular defect best unifies the findings?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Impaired Cdc42-WASp-Arp2/3-dependent actin polymerization in hematopoietic cells"
+        },
+        {
+          "id": 2,
+          "text_html": "Failure of Bruton tyrosine kinase signaling during pre-B-cell maturation"
+        },
+        {
+          "id": 3,
+          "text_html": "Absent CD40 ligand expression on activated helper T cells"
+        },
+        {
+          "id": 4,
+          "text_html": "Defective NADPH oxidase assembly in phagolysosomes"
+        },
+        {
+          "id": 5,
+          "text_html": "Accumulation of deoxyadenosine metabolites from adenosine deaminase deficiency"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Wiskott-Aldrich syndrome is an X-linked disorder caused by loss-of-function variants in WAS. WASp links signaling to Arp2/3-mediated actin polymerization in hematopoietic cells, supporting immune-synapse formation, migration, cytotoxicity, and platelet function. The classic triad is eczema, recurrent infection, and thrombocytopenia with unusually small platelets.</p>",
+      "wrong_choice_explanations": {
+        "2": "BTK deficiency causes X-linked agammaglobulinemia with absent mature B cells but not small-platelet thrombocytopenia and eczema.",
+        "3": "CD40 ligand deficiency causes hyper-IgM syndrome and opportunistic infection without the characteristic platelet abnormality.",
+        "4": "NADPH oxidase deficiency causes chronic granulomatous disease with catalase-positive infections but normal platelet size.",
+        "5": "Adenosine deaminase deficiency causes severe combined immunodeficiency with profound lymphopenia rather than the classic Wiskott-Aldrich phenotype."
+      },
+      "educational_objective": "Connect eczema, recurrent infection, and small-platelet thrombocytopenia to defective WASp-dependent actin remodeling in hematopoietic cells.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/wiskott-wasp-actin-synapse.svg",
+          "placement": "question",
+          "type": "original_vector_immunologic_synapse",
+          "alt_text": "Connect eczema, recurrent infection, and small-platelet thrombocytopenia to defective WASp-dependent actin remodeling in hematopoietic cells.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "gene_review",
+          "citation": "WAS-Related Disorders. GeneReviews. Updated 2026. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK1178/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-NEURO-LEMS-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neuromuscular junction disorders",
+        "topic": "Lambert-Eaton myasthenic syndrome",
+        "subtopic": "Presynaptic P/Q-type calcium-channel autoimmunity and facilitation"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 65-year-old man with a 50-pack-year smoking history has dry mouth and progressive difficulty rising from chairs. Hip-flexor strength improves briefly after repeated contraction, and previously absent patellar reflexes become detectable after exercise. High-frequency repetitive nerve stimulation produces a large incremental response. Which protein is the most likely target of the pathogenic antibody?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Postsynaptic nicotinic acetylcholine receptor"
+        },
+        {
+          "id": 2,
+          "text_html": "Presynaptic P/Q-type voltage-gated calcium channel"
+        },
+        {
+          "id": 3,
+          "text_html": "Vesicle-associated SNARE protein cleaved by botulinum toxin"
+        },
+        {
+          "id": 4,
+          "text_html": "Skeletal-muscle ryanodine receptor"
+        },
+        {
+          "id": 5,
+          "text_html": "Voltage-gated sodium channel at the node of Ranvier"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Lambert-Eaton myasthenic syndrome is caused by antibodies to presynaptic P/Q-type voltage-gated calcium channels. Reduced calcium entry decreases acetylcholine release. Repetitive activity allows calcium to accumulate in the terminal, transiently improving strength and reflexes and producing electrophysiologic facilitation. The syndrome is frequently paraneoplastic with small-cell lung carcinoma.</p>",
+      "wrong_choice_explanations": {
+        "1": "Postsynaptic acetylcholine-receptor antibodies cause myasthenia gravis, in which weakness typically worsens with use and reflexes are preserved.",
+        "3": "Botulinum toxin cleaves SNARE proteins and can cause presynaptic failure, but the autoimmune paraneoplastic pattern and facilitation identify Lambert-Eaton syndrome.",
+        "4": "Ryanodine-receptor abnormalities cause malignant hyperthermia or certain myopathies rather than this presynaptic syndrome.",
+        "5": "Nodal sodium-channel dysfunction would impair action-potential propagation and does not explain autonomic symptoms with high-frequency facilitation."
+      },
+      "educational_objective": "Recognize Lambert-Eaton syndrome as presynaptic P/Q-type calcium-channel autoimmunity causing reduced acetylcholine release and exercise-related facilitation.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/lambert-eaton-presynaptic-calcium.svg",
+          "placement": "question",
+          "type": "original_vector_neuromuscular_junction",
+          "alt_text": "Recognize Lambert-Eaton syndrome as presynaptic P/Q-type calcium-channel autoimmunity causing reduced acetylcholine release and exercise-related facilitation.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "peer_reviewed_review",
+          "citation": "Mareska M, Gutmann L. Lambert-Eaton myasthenic syndrome. Semin Neurol. 2004;24:149-153.",
+          "url": "https://pubmed.ncbi.nlm.nih.gov/15257511/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

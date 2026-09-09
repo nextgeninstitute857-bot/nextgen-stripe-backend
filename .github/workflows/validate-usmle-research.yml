@@ -1,0 +1,36 @@
+name: Validate USMLE Research Drafts
+
+on:
+  pull_request:
+    paths:
+      - "research/usmle-step1-2026/**"
+      - "scripts/validate-usmle-research-drafts.mjs"
+      - "scripts/validate-usmle-answer-positions.mjs"
+      - "scripts/lib/answer-order-policy.mjs"
+      - ".github/workflows/validate-usmle-research.yml"
+  push:
+    branches:
+      - "research/usmle-step1-2026-original-qbank"
+    paths:
+      - "research/usmle-step1-2026/**"
+      - "scripts/validate-usmle-research-drafts.mjs"
+      - "scripts/validate-usmle-answer-positions.mjs"
+      - "scripts/lib/answer-order-policy.mjs"
+      - ".github/workflows/validate-usmle-research.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-private-drafts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate JSON, taxonomy, review gates, and original media
+        run: node scripts/validate-usmle-research-drafts.mjs
+      - name: Validate authored balance and student answer shuffling
+        run: node scripts/validate-usmle-answer-positions.mjs

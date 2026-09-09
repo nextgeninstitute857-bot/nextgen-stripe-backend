@@ -1,0 +1,68 @@
+{
+  "schema_version": "aylamed-usmle-pilot-generator-config-v1",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "target_questions": 100,
+  "planner": {
+    "cluster_batch_size": 5,
+    "objectives_per_cluster": 4,
+    "maximum_calls": 5
+  },
+  "workers": {
+    "concurrency": 10,
+    "writer_calls": 100,
+    "reviewer_calls": 100,
+    "maximum_revision_calls": 15
+  },
+  "limits": {
+    "maximum_api_requests": 220,
+    "maximum_total_input_tokens": 3000000,
+    "maximum_total_output_tokens": 1200000,
+    "maximum_estimated_cost_usd": 75,
+    "request_timeout_ms": 600000,
+    "maximum_retries_per_request": 1
+  },
+  "models": {
+    "planner_env": "AYLA_PILOT_PLANNER_MODEL",
+    "writer_env": "AYLA_PILOT_WRITER_MODEL",
+    "reviewer_env": "AYLA_PILOT_REVIEWER_MODEL",
+    "fallback_env": "AI_MODEL"
+  },
+  "research": {
+    "web_search_required": true,
+    "allowed_domains": [
+      "usmle.org",
+      "nbme.org",
+      "nih.gov",
+      "ncbi.nlm.nih.gov",
+      "pubmed.ncbi.nlm.nih.gov",
+      "cdc.gov",
+      "fda.gov",
+      "who.int",
+      "aafp.org",
+      "acc.org",
+      "heart.org",
+      "thoracic.org",
+      "kdigo.org",
+      "ashpublications.org",
+      "idsociety.org"
+    ]
+  },
+  "quality": {
+    "minimum_options": 5,
+    "maximum_options": 5,
+    "minimum_reviewer_score": 4,
+    "maximum_internal_shingle_similarity": 0.42,
+    "require_wrong_choice_explanations": true,
+    "require_authoritative_references": true,
+    "require_media_spec_when_media_required": true,
+    "clinician_review_required": true,
+    "proprietary_similarity_review_required": true
+  },
+  "output": {
+    "root": "research/usmle-step1-2026/pilot-100/runs",
+    "write_into_release_drafts": false,
+    "publication_state": "blocked",
+    "commit_results_automatically": false
+  }
+}
