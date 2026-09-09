@@ -1,12 +1,56 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
-import { contentQbankFacetQuery, contentQbankFacetsQuery, contentQbankQuestionsQuery } from '../lib/content-registry-postgres.js';
+import { contentQbankFacetQuery, contentQbankFacetsQuery, contentQbankQuestionsQuery, contentQbankSelectionPredicate } from '../lib/content-registry-postgres.js';
 import { buildAylaQbankFacetTree } from '../lib/aylamed-qbank-facets.js';
 
 // Optional local PostgreSQL/WASM runtime; never connects to a service or loads
 // production credentials. Unit tests have no additional package dependency.
 const runtime = process.env.AYLA_TEST_PGLITE_PATH;
+test('PostgreSQL exact branch membership preserves all depths, tuple boundaries and legacy fallbacks', {skip: !runtime}, async()=>{
+  const {PGlite}=await import(pathToFileURL(runtime).href);
+  const db=new PGlite();
+  try {
+    await db.exec('CREATE TABLE branch_questions (id uuid, taxonomy jsonb, system_key text, title text, source_data jsonb)');
+    const keys=['system_key','subsystem_key','topic_key','subtopic_key'];
+    const rows=Array.from({length:160},(_,i)=>({
+      id:`00000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`,
+      taxonomy:{system_key:`system-${i%8}`,subsystem_key:`subsystem-${i%11}`,topic_key:`topic-${i%17}`,subtopic_key:`leaf-${i}`},
+      system_key:'fallback',title:'Original question',source_data:{},
+    }));
+    rows[0].taxonomy={system_key:'a|b',subsystem_key:'c',topic_key:'d',subtopic_key:'e'};
+    rows[1].taxonomy={system_key:'a',subsystem_key:'b|c',topic_key:'d',subtopic_key:'e'};
+    rows[2].taxonomy={system_key:"quotes' OR TRUE --",subsystem_key:'腎臓',topic_key:'line\nfeed',subtopic_key:'[x,y]'};
+    rows[3].taxonomy={system_key:'',subsystem_key:'legacy',subtopic_key:''};rows[3].title='Legacy clinical title';
+    rows[4].taxonomy=null;rows[4].system_key=null;rows[4].title=null;
+    rows[5].taxonomy={system_key:'broad',subsystem_key:'source',topic_key:'',subtopic_key:''};
+    await db.query(`INSERT INTO branch_questions SELECT * FROM jsonb_to_recordset($1::jsonb)
+      AS r(id uuid,taxonomy jsonb,system_key text,title text,source_data jsonb)`,[JSON.stringify(rows)]);
+    const pathOf=row=>({
+      system_key:row.taxonomy?.system_key||row.system_key||'unclassified',
+      subsystem_key:row.taxonomy?.subsystem_key??'',
+      topic_key:row.taxonomy?.topic_key??(row.title||'unclassified'),
+      subtopic_key:row.taxonomy?.subtopic_key??'',
+    });
+    const full=rows.slice(10,110).map(pathOf),prefix=(row,n)=>Object.fromEntries(keys.slice(0,n).map(k=>[k,pathOf(row)[k]]));
+    const cases=[undefined,[],full,
+      [prefix(rows[0],2)], [prefix(rows[1],2)], [pathOf(rows[2])],
+      [prefix(rows[3],3)], [{system_key:'unclassified'}], [prefix(rows[5],2)],
+      [prefix(rows[6],1),prefix(rows[7],2),prefix(rows[8],3),pathOf(rows[9]),...full],
+      [{system_key:'absent',subsystem_key:'missing'}],
+    ];
+    for(const selection_paths of cases){
+      const query=contentQbankSelectionPredicate({filters:{selection_paths}});
+      const actual=(await db.query(`SELECT q.id FROM branch_questions q WHERE TRUE ${query.sql} ORDER BY q.id`,query.values)).rows.map(r=>r.id);
+      const expected=rows.filter(row=>selection_paths===undefined||selection_paths.some(path=>Object.entries(path).every(([k,v])=>pathOf(row)[k]===v))).map(r=>r.id).sort();
+      assert.deepEqual(actual,expected);
+    }
+    const selected=contentQbankSelectionPredicate({filters:{selection_paths:full}});
+    const explained=(await db.query(`EXPLAIN (FORMAT JSON) SELECT q.id FROM branch_questions q WHERE TRUE ${selected.sql}`,selected.values)).rows[0]['QUERY PLAN'];
+    assert.match(JSON.stringify(explained),/hashed SubPlan/,'Selected branches should be hashed once, not rescanned for every question');
+  } finally { await db.close(); }
+});
+
 test('PostgreSQL executes facet and selection predicates against adversarial eligibility fixtures', {skip: !runtime}, async()=>{
   const {PGlite}=await import(pathToFileURL(runtime).href);
   const db=new PGlite();
