@@ -13,9 +13,11 @@ import {
   contentDeliveryPolicySnapshot,
 } from "./lib/content-delivery-priority.js";
 import {
+  filterFlashcardsForSystem,
   flashcardMatchesCurrentSystem,
   flashcardPriorityRank,
 } from "./lib/flashcard-queue-policy.js";
+import { summarizeRoadmapProgress } from "./lib/lms-roadmap-progress.js";
 import {
   flashcardPostgresStatus,
   shadowWriteFlashcardReview,
@@ -7756,18 +7758,32 @@ function buildProgressSummary({ db, courseId, userId }) {
     }
   }
 
-  const total = teachingDays.length;
-  const completed = teachingDays.filter((d) => completedIds.has(d.id)).length;
+  const progressRows = teachingDays.map((day) => {
+    const requiredItems = ngGetTaskItems(day).filter((item) => item.required !== false);
+    const taskProgress = ngGetDailyTaskProgress(db, {
+      courseId,
+      userId,
+      dayId: day.id,
+      day,
+    });
+    const tasks = taskProgress?.tasks && typeof taskProgress.tasks === "object"
+      ? taskProgress.tasks
+      : {};
+
+    return {
+      completed: completedIds.has(day.id),
+      required_task_count: requiredItems.length,
+      required_completed_count: requiredItems.filter((item) => tasks[item.key]?.completed === true).length,
+    };
+  });
+  const roadmapProgress = summarizeRoadmapProgress(progressRows);
   const today = ngDailySessionDateKey(new Date(), roadmap?.settings?.timezone || "America/New_York");
   const todayDay = selectStudentCurrentRoadmapDay({ days, teachingDays, today });
   const completedSystems = Array.from(new Set(teachingDays.filter((d) => completedIds.has(d.id)).map((d) => d.system || d.chapter).filter(Boolean)));
   const currentSystem = todayDay?.system || todayDay?.chapter || null;
   return {
     course_id: courseId,
-    total_days: total,
-    completed_days: completed,
-    remaining_days: Math.max(0, total - completed),
-    progress_percentage: total ? Math.round((completed / total) * 100) : 0,
+    ...roadmapProgress,
     current_week: todayDay?.week_number || null,
     current_day: todayDay?.day_number || null,
     current_system: currentSystem,
@@ -72969,6 +72985,7 @@ app.get("/student/flashcards/review", async (req, res) => {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    const requestedSystem = String(req.query.system || "").trim();
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     const access = ngCourseFeatureAccess(db, user, { courseId, featureKey: "flashcards" });
     if (!access.allowed) return ngBlockLockedFeature(res, "flashcards", access.reason);
@@ -73025,19 +73042,21 @@ app.get("/student/flashcards/review", async (req, res) => {
       return Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(a.created_at || "").localeCompare(String(b.created_at || ""));
     });
 
-    const availableCards = cards;
+    const availableCards = filterFlashcardsForSystem(cards, requestedSystem);
     const availableSections = ngBuildStudentFlashcardSections(availableCards);
     const queueLimit = Math.max(10, Math.min(40, Number(req.query.limit || 28)));
-    const stableQueue = ngStableStudentDailyFlashcardQueue(db, {
-      courseId,
-      userId: user.id,
-      date: today,
-      cards: availableCards,
-      limit: queueLimit,
-      currentSystem: String(todayDay?.system || todayDay?.current_system || todayDay?.topic || ""),
-    });
+    const stableQueue = requestedSystem
+      ? { cards: availableCards.slice(0, queueLimit), changed: false }
+      : ngStableStudentDailyFlashcardQueue(db, {
+          courseId,
+          userId: user.id,
+          date: today,
+          cards: availableCards,
+          limit: queueLimit,
+          currentSystem: String(todayDay?.system || todayDay?.current_system || todayDay?.topic || ""),
+        });
     const queueCards = stableQueue.cards;
-    if (stableQueue.changed) await writeLiveDb(db);
+    if (!requestedSystem && stableQueue.changed) await writeLiveDb(db);
     const sections = ngBuildStudentFlashcardSections(queueCards);
     const reviewedCount = queueCards.filter((card) => card.reviewed).length;
     const totalReviewedCount = availableCards.filter((card) => card.reviewed).length;
@@ -73046,13 +73065,14 @@ app.get("/student/flashcards/review", async (req, res) => {
     res.json({
       success: true,
       course_id: courseId,
+      focused_system: requestedSystem || null,
       count: queueCards.length,
       flashcards: queueCards,
       sections,
       queue_limit: queueLimit,
       queue_count: queueCards.length,
       queue_date: today,
-      queue_stable: true,
+      queue_stable: !requestedSystem,
       queue_due_count: queueCards.filter((card) => !card.reviewed).length,
       available_count: availableCards.length,
       available_due_count: totalDueCount,
@@ -73067,7 +73087,11 @@ app.get("/student/flashcards/review", async (req, res) => {
       today: todayDay ? sanitizeRoadmapDay(todayDay) : null,
       holiday_today: holidayToday,
       holiday_message: holidayToday ? "Today is a holiday/no-live-class day. Class cards are paused, but published review cards and weak-area cards remain available." : null,
-      message: availableCards.length > queueCards.length ? `Showing ${queueCards.length} focused cards today. ${availableCards.length} published cards stay safely in the background bank.` : null,
+      message: requestedSystem
+        ? `Showing review cards for ${requestedSystem}.`
+        : availableCards.length > queueCards.length
+          ? `Showing ${queueCards.length} focused cards today. ${availableCards.length} published cards stay safely in the background bank.`
+          : null,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
