@@ -11506,7 +11506,7 @@ function ngAssessmentAutomationLectures(db, courseId, nowMs = Date.now()) {
     if (session) seen.add(session.id);
     const date = String(session?.scheduled_date || day.date || day.scheduled_date || '').slice(0,10);
     const start = getSessionStartUtc(date, session?.scheduled_time || day.scheduled_time || day.class_time || course.scheduled_time, session?.scheduled_timezone || day.scheduled_timezone || course.scheduled_timezone || 'America/New_York');
-    const duration = Number(session?.duration_minutes || day.duration_minutes || 60);
+    const duration = Number(session?.duration_minutes || day.duration_minutes || 60) || 60;
     const end = start ? new Date(start.getTime() + Math.max(30,duration)*60000) : null;
     const resolved = session ? ngResolveStudentNotesForSession(db, session, { publishedOnly: true }) : null;
     const note = resolved?.note;
