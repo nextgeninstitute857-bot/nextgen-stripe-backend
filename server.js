@@ -1,4 +1,6 @@
 import express from "express";
+import { generateGroundedAssessment, assessmentResponseFormat, stripChoiceLabel } from './lib/lms-assessment-quality.js';
+import { publicAutomationState, updateAutomationSettings, runAssessmentAutomation } from './lib/lms-assessment-automation.js';
 import { inboxActivityCounts, hasInboxContent, uniqueInboxMessages, applyWhatsAppReceipt } from "./lib/crm-inbox-indicators.js";
 import { normalizeLearningCorrection, reviewedLearningRules, learningGuidance, learningEvidence, preserveLearningRecords } from "./lib/crm-reviewed-learning.js";
 import { EXPERIENCE_TEMPLATE, experienceTemplateSubmission } from "./lib/crm-experience-template.js";
@@ -2515,8 +2517,9 @@ function ngMergeLiveDb(parsed = {}) {
     };
 }
 
+const liveReadAssessmentIds = new WeakMap();
 function cloneLiveDbForRequest(db) {
-  return {
+  const snapshot = {
     ...db,
     featureCatalog: { ...(db?.featureCatalog || {}) },
     demoSettings: { ...(db?.demoSettings || {}) },
@@ -2526,6 +2529,8 @@ function cloneLiveDbForRequest(db) {
     emailBroadcasts: safeArray(db?.emailBroadcasts),
     emailAutomationState: { ...(db?.emailAutomationState || {}) },
   };
+  liveReadAssessmentIds.set(snapshot, new Set(Object.keys(db.assessments || {})));
+  return snapshot;
 }
 
 async function readLiveDbFromDisk() {
@@ -2605,6 +2610,17 @@ async function writeLiveDb(db, { teachingAccessSource = "lms_database_write" } =
     })
     .then(async () => {
     await ensureDataDir();
+    // These collections are written exclusively through mutateLiveDb. A legacy
+    // request holding an older snapshot must not roll back an off switch or job.
+    if (liveDbCache?.assessmentAutomation) db.assessmentAutomation = liveDbCache.assessmentAutomation;
+    const readIds = liveReadAssessmentIds.get(db);
+    if (readIds) {
+      for (const [id, assessment] of Object.entries(liveDbCache?.assessments || {})) {
+        if (assessment.automation_run_key && !readIds.has(id)) {
+          db.assessments = { ...(db.assessments || {}), [id]: assessment };
+        }
+      }
+    }
     const teachingAccess = ngApplyTeachingAccessReconciliation(db, {
       source: teachingAccessSource,
     });
@@ -8840,11 +8856,11 @@ function ngAssessmentTopicFromQuestion(question = {}, fallback = "General") {
 
 function ngOptionExplanationAt(question = {}, optionIndex = 0) {
   const raw = question.wrong_choice_explanations || question.option_explanations || question.choice_explanations || [];
-  if (Array.isArray(raw)) return String(raw[optionIndex] || "").trim();
+  if (Array.isArray(raw)) return stripChoiceLabel(raw[optionIndex] || "");
   if (raw && typeof raw === "object") {
     const keys = [optionIndex, String(optionIndex), String.fromCharCode(65 + Number(optionIndex || 0))];
     for (const key of keys) {
-      if (raw[key] !== undefined) return String(raw[key] || "").trim();
+      if (raw[key] !== undefined) return stripChoiceLabel(raw[key] || "");
     }
   }
   return "";
@@ -8855,6 +8871,8 @@ function ngDetailedCorrectExplanation(question = {}, options = [], correctIndex 
   const topic = ngAssessmentTopicFromQuestion(question, system);
   const correctText = String(options?.[correctIndex] || question.correct_answer || question.answer || "the correct answer").trim();
   const base = String(question.detailed_explanation || question.explanation || "").trim();
+
+  if (question.cognitive_level || question.source_quote) return base;
 
   if (base.length >= 180) return base;
 
@@ -10764,6 +10782,7 @@ async function callOpenAIResponsesAPI({
       usage: normalizeAIUsage(responseData?.usage || {}),
       model,
       raw_model: responseData?.model || model,
+      response_status: responseData?.status || 'completed',
       response_id: responseData?.id || null,
       output: Array.isArray(responseData?.output) ? responseData.output : [],
     };
@@ -11101,96 +11120,39 @@ ${chunks[index]}
   };
 }
 
-async function generateQuestionsWithAI({
-  sourceText,
-  questionCount = 10,
-  difficulty = "mixed",
-  questionType = "mcq",
-  metadata = {},
-  mediaUrl = "",
-  mediaId = "",
-  mediaType = "",
-  caption = "",
-}) {
-  const cleanText = validateAISourceText(sourceText);
-  const count = Math.max(1, Math.min(50, Number(questionCount || 10)));
-
-  const systemPrompt = `
-You are generating original USMLE Step 1 assessment questions for NextGen USMLE.
-
-Style target:
-- Original USMLE/NBME-style clinical vignette, not short recall.
-- Do NOT copy or paraphrase proprietary question-bank wording.
-- Use exam-style reasoning similar in rigor to commercial QBank questions, but the wording must be fully original.
-
-Rules:
-- Use only the provided source material and standard in-source concepts; do not invent unsupported facts.
-- Prefer long clinical stems with age, sex, presenting symptom, relevant history, physical exam, labs/vitals/imaging when appropriate.
-- Test mechanism, diagnosis, next best explanation, pathology, pharmacology, physiology, or ethics reasoning.
-- Avoid giveaway wording and avoid asking directly for a memorized fact unless the source is too limited.
-- Each question must have exactly 5 options: A, B, C, D, E.
-- Each option must be plausible and medically coherent.
-- Each question must have one best answer.
-- Include a clear explanation for the correct answer.
-- Include concise wrong-choice explanations for all options.
-- Include system, topic, tested_concept, and difficulty.
-- If there is not enough material, generate fewer questions and include a warning.
-- Return strict JSON only.
-`.trim();
-
-  const userPrompt = `
-Generate ${count} ${questionType || "mcq"} questions.
-
-Difficulty: ${difficulty || "mixed"}
-Metadata: ${JSON.stringify(metadata || {})}
-
-Return JSON exactly in this shape:
-{
-  "questions": [
-    {
-      "question_text": "...",
-      "options": {
-        "A": "...",
-        "B": "...",
-        "C": "...",
-        "D": "...",
-        "E": "..."
-      },
-      "correct_answer": "A",
-      "explanation": "...",
-      "wrong_choice_explanations": ["A: ...", "B: ...", "C: ...", "D: ...", "E: ..."],
-      "system": "...",
-      "topic": "...",
-      "tested_concept": "...",
-      "difficulty": "medium",
-      "points": 1
-    }
-  ],
-  "warnings": []
+async function ngGenerateQualityAssessment({ sources, questionCount, difficulty = "mixed", checkpoint, previousStems, user }) {
+  if (!isAIConfigured()) throw new Error(getAIConfigError());
+  const usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+  const model = String(process.env.ASSESSMENT_AI_MODEL || getAIModel()).trim();
+  const reviewModel = String(process.env.ASSESSMENT_REVIEW_MODEL || model).trim();
+  const result = await generateGroundedAssessment({
+    sources, questionCount: Number(questionCount), difficulty, checkpoint, previousStems,
+    ask: async ({ stage, ...request }) => {
+      if (ngBackgroundMemoryIsHigh("assessment_quality_generation")) throw new Error("Generation paused for server memory safety. Retry this run later.");
+      const selectedModel = stage.includes("review") ? reviewModel : model;
+      const response = await callOpenAIResponsesAPI({
+        ...request, model: selectedModel, textFormat: assessmentResponseFormat(stage),
+      });
+      for (const key of Object.keys(usage)) usage[key] += Number(response.usage?.[key] || 0);
+      // Each call is logged even if a later quality gate rejects the draft.
+      await logAIUsage({ user, action: `assessment_quality_${stage}`, model: response.raw_model || selectedModel, usage: response.usage, sourceLength: request.userPrompt.length });
+      if (response.response_status !== "completed") throw new Error("AI response was incomplete; no assessment was saved.");
+      return safeJsonParseFromAI(response.text);
+    },
+  });
+  return { ...result, usage, model, usage_logged: true };
 }
 
-Source material:
-${cleanText}
-`.trim();
-
-  const model = getAIModel();
-
-  const aiResult = await callOpenAIResponsesAPI({
-    model,
-    systemPrompt,
-    userPrompt,
-    maxOutputTokens: 7000,
-    jsonMode: true,
-  });
-
-  const parsed = safeJsonParseFromAI(aiResult.text);
-
-  return {
-    questions: normalizeAIQuestions(parsed.questions || []),
-    warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
-    usage: aiResult.usage,
-    model: aiResult.raw_model || model,
-  };
+async function generateQuestionsWithAI({
+  sourceText, questionCount = 10, difficulty = "mixed", metadata = {}, sources = null, user = null,
+}) {
+  const selectedSources = sources || [{
+    id: String(metadata.session_id || "manual-source"),
+    title: metadata.session_topic || metadata.title || "Selected lecture notes",
+    system: metadata.system || metadata.topic || "General",
+    text: validateAISourceText(sourceText),
+  }];
+  return ngGenerateQualityAssessment({ sources: selectedSources, questionCount, difficulty, user });
 }
 
 app.post("/admin/ai/clean-notes", async (req, res) => {
@@ -11531,6 +11493,98 @@ app.post("/admin/live-sessions/:sessionId/generate-clean-notes", async (req, res
   }
 });
 
+function ngAssessmentAutomationLectures(db, courseId, nowMs = Date.now()) {
+  const course = db.courses?.[courseId];
+  if (!course || ngCourseIsHiddenFromStudents(course)) return [];
+  const sessions = Object.values(db.liveSessions || {}).filter(s => String(s.course_id) === courseId && !ngSessionIsInternalTestOrHidden(s) && !ngStudentNotesSessionIsNoClass(s));
+  const days = ngGetRoadmapDaysForCourse(db, courseId).filter(d => !ngRoadmapDayIsNoClass(d) && d.is_published !== false && !d.assessment_day);
+  const seen = new Set();
+  return days.map(day => {
+    const requestedId = String(day.live_session_id || day.session_id || '');
+    const session = sessions.find(s => String(s.id) === requestedId) || sessions.find(s => String(s.roadmap_day_id || '') === String(day.id));
+    if (session && seen.has(session.id)) return null;
+    if (session) seen.add(session.id);
+    const date = String(session?.scheduled_date || day.date || day.scheduled_date || '').slice(0,10);
+    const start = getSessionStartUtc(date, session?.scheduled_time || day.scheduled_time || day.class_time || course.scheduled_time, session?.scheduled_timezone || day.scheduled_timezone || course.scheduled_timezone || 'America/New_York');
+    const duration = Number(session?.duration_minutes || day.duration_minutes || 60);
+    const end = start ? new Date(start.getTime() + Math.max(30,duration)*60000) : null;
+    const resolved = session ? ngResolveStudentNotesForSession(db, session, { publishedOnly: true }) : null;
+    const note = resolved?.note;
+    const text = note ? ngNoteTextForAssessment(note) : '';
+    return {
+      id: session?.id || `missing-session:${day.id}`, roadmap_day_id: day.id,
+      note_id: resolved?.note_key || note?.id || null,
+      title: day.title || session?.topic || session?.title || 'Lecture',
+      system: ngNormalizeMasterMapSystemName(day.system || session?.system || ''), date,
+      start_at: start?.toISOString() || null, end_at: end?.toISOString() || null,
+      completed: Boolean(session && end && end.getTime() <= nowMs && ngSessionComputedStatus(session, nowMs) === 'completed'),
+      ready: Boolean(note && ngStudentNotesIsPublished(note) && text.length >= 300), text,
+    };
+  }).filter(Boolean);
+}
+
+let ngAssessmentGeneratorRunning = false;
+let ngAssessmentGeneratorTimer = null;
+async function ngRunAssessmentGeneratorTick() {
+  if (ngAssessmentGeneratorRunning || ngBackgroundMemoryIsHigh('assessment_generator')) return;
+  ngAssessmentGeneratorRunning = true;
+  try {
+    return await runAssessmentAutomation({ read: readLiveDb, mutate: mutateLiveDb, catalog: ngAssessmentAutomationLectures,
+      generate: (options) => ngGenerateQualityAssessment({ ...options, user: { id: 'assessment_automation', name: 'Assessment automation' } }),
+    });
+  } finally { ngAssessmentGeneratorRunning = false; }
+}
+function ngStartAssessmentGeneratorScheduler() {
+  if (ngAssessmentGeneratorTimer || process.env.NEXTGEN_ASSESSMENT_SCHEDULER_ENABLED === 'false') return;
+  const run = () => ngRunAssessmentGeneratorTick().catch(e => console.error('Assessment generator:', e.message));
+  ngAssessmentGeneratorTimer = setInterval(run, 60_000);
+  ngAssessmentGeneratorTimer.unref?.();
+  setTimeout(run, 20_000).unref?.();
+}
+
+// Register before /admin/assessments/:assessmentId.
+app.get('/admin/assessments/automation', async (req, res) => {
+  try {
+    await requireLmsPermission(req, 'lms.assessments.view');
+    const courseId = String(req.query.course_id || '');
+    const db = await readLiveDb();
+    if (!db.courses?.[courseId]) return res.status(404).json({ success: false, error: 'Course not found' });
+    const lectures = ngAssessmentAutomationLectures(db, courseId);
+    res.json({ success: true, ...publicAutomationState(db, courseId, lectures), ai_configured: isAIConfigured(), scheduler_enabled: process.env.NEXTGEN_ASSESSMENT_SCHEDULER_ENABLED !== 'false', lecture_catalog_ready: lectures.length > 0 });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
+});
+
+app.patch('/admin/assessments/automation', async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, 'lms.assessments.create');
+    const { course_id: courseId, ...patch } = req.body || {};
+    const settings = await mutateLiveDb(db => {
+      if (!db.courses?.[courseId] || ngCourseIsHiddenFromStudents(db.courses[courseId])) { const e = new Error('Active course not found'); e.statusCode = 404; throw e; }
+      db.assessmentAutomation ||= { settings: {}, runs: {} };
+      db.assessmentAutomation.settings ||= {};
+      const next = updateAutomationSettings(db.assessmentAutomation.settings[courseId], patch, user.id);
+      if ((next.weekly_enabled || next.grand_enabled) && !isAIConfigured()) throw new Error(getAIConfigError());
+      if ((next.weekly_enabled || next.grand_enabled) && !ngAssessmentAutomationLectures(db,courseId).length) throw new Error('A published lecture roadmap is required before enabling automation.');
+      db.assessmentAutomation.settings[courseId] = next;
+      return next;
+    });
+    res.json({ success: true, settings });
+  } catch (e) { res.status(e.statusCode || 400).json({ success: false, error: e.message }); }
+});
+
+app.post('/admin/assessments/automation/retry', async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, 'lms.assessments.create');
+    await mutateLiveDb(db => {
+      const row = db.assessmentAutomation?.runs?.[String(req.body.run_key || '')];
+      if (!row || String(row.course_id) !== String(req.body.course_id)) throw new Error('Run not found');
+      if (!['failed','waiting_for_notes','skipped'].includes(row.status)) throw new Error('This run cannot be retried');
+      row.status = 'queued'; row.retry_after = null; row.updated_at = new Date().toISOString(); row.retried_by = user.id;
+    });
+    res.json({ success: true, message: 'Retry queued. The scheduler will recheck the original lecture scope.' });
+  } catch (e) { res.status(e.statusCode || 400).json({ success: false, error: e.message }); }
+});
+
 app.post("/admin/assessments/generate-from-source", async (req, res) => {
   try {
     const { user } = await requireLmsPermission(req, "lms.assessments.create");
@@ -11570,6 +11624,7 @@ app.post("/admin/assessments/generate-from-source", async (req, res) => {
     const blockConfig = ngNormalizeAssessmentBlockConfig(req.body || {});
 
     const result = await generateQuestionsWithAI({
+      user,
       sourceText,
       questionCount: blockConfig.question_count,
       difficulty: req.body.difficulty || "mixed",
@@ -11585,7 +11640,7 @@ app.post("/admin/assessments/generate-from-source", async (req, res) => {
       },
     });
 
-    const usageLog = await logAIUsage({
+    const usageLog = result.usage_logged ? null : await logAIUsage({
       user,
       action: "generate_assessment",
       model: result.model,
@@ -11598,6 +11653,7 @@ app.post("/admin/assessments/generate-from-source", async (req, res) => {
       success: true,
       questions: result.questions,
       warnings: result.warnings,
+      quality_report: result.quality_report,
       source_length: String(sourceText || "").length,
       ai_usage: usageLog,
     });
@@ -11858,8 +11914,10 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
       sessionIds: selectedSessionIds,
       roadmapDayIds: selectedRoadmapDayIds,
       includeDrafts: req.body.include_drafts === true,
-      maxChars: req.body.max_source_chars || 60000,
+      maxChars: Math.min(1600000, Number(req.body.max_source_chars || 1600000)),
     });
+
+    if (collected.truncated) return res.status(422).json({ success: false, error: 'The selected notes exceed the safe source budget. No lectures were silently omitted; select fewer lectures.' });
 
     if (!collected.sourceText || collected.sourceText.length < 300) {
       return res.status(400).json({
@@ -11869,11 +11927,13 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
       });
     }
 
-    const questionCount = Math.max(1, Math.min(50, Number(req.body.question_count || 20)));
+    const questionCount = Math.max(1, Math.min(120, Number(req.body.question_count || 20)));
     const difficulty = String(req.body.difficulty || "mixed").trim() || "mixed";
     const assessmentType = String(req.body.assessment_type || req.body.type || "weekly_notes").trim() || "weekly_notes";
 
     const result = await generateQuestionsWithAI({
+      user,
+      sources: collected.notes.map(row => ({ id: row.sessionId, title: row.title, system: row.system, date: row.date, text: row.text })),
       sourceText: collected.sourceText,
       questionCount,
       difficulty,
@@ -11890,7 +11950,7 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
       },
     });
 
-    const usageLog = await logAIUsage({
+    const usageLog = result.usage_logged ? null : await logAIUsage({
       user,
       action: "generate_notes_assessment",
       model: result.model,
@@ -11900,7 +11960,8 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
     });
 
     const id = uuid();
-    const publishNow = req.body.publish_now === true || req.body.is_published === true;
+    // Generated medical assessments always require a separate tutor publish action.
+    const publishNow = false;
     const nowIsoValue = new Date().toISOString();
 
     const assessment = {
@@ -11924,6 +11985,8 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
       question_count: result.questions.length,
       duration_minutes: req.body.duration_minutes ? Number(req.body.duration_minutes) : null,
       questions: result.questions,
+      quality_report: result.quality_report,
+      generator_version: result.quality_report?.version,
       secure_mode: req.body.secure_mode !== false,
       shuffle_questions: req.body.shuffle_questions !== false,
       show_result_after_submit: req.body.show_result_after_submit !== false,
@@ -19050,6 +19113,11 @@ app.post("/admin/assessments/:assessmentId/publish", async (req, res) => {
     const a = db.assessments[req.params.assessmentId];
     if (!a) return res.status(404).json({ success: false, error: "Assessment not found" });
 
+    const generated = Boolean(a.generator_version || a.quality_report || a.questions?.some(q => q.source_quote && q.cognitive_level));
+    if (generated && req.body.is_published !== false && req.body.tutor_review_confirmed !== true) {
+      return res.status(400).json({ success: false, error: 'Confirm tutor review of the questions, answers and lecture coverage before publishing.' });
+    }
+
     const hasAttempts = Object.values(db.assessmentAttempts || {}).some((attempt) => String(attempt.assessment_id || "") === String(a.id));
     if (!hasAttempts && Array.isArray(a.questions)) {
       const baselineRepair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, a);
@@ -19070,6 +19138,11 @@ app.post("/admin/assessments/:assessmentId/publish", async (req, res) => {
     a.published_at = a.is_published ? new Date().toISOString() : null;
     a.published_by = a.is_published ? user.id : null;
     a.updated_at = new Date().toISOString();
+    if (generated && a.is_published) {
+      a.tutor_reviewed_at = a.updated_at;
+      a.tutor_reviewed_by = user.id;
+      if (a.quality_report) a.quality_report = { ...a.quality_report, human_review_required: false, status: 'tutor_reviewed' };
+    }
     let email_notification = null;
     if (a.is_published === true && a.course_id) {
       const course = db.courses?.[String(a.course_id)] || null;
@@ -99029,6 +99102,7 @@ async function startNextgenServer() {
   ngStartAutoZoomPrepareScheduler();
   ngStartFutureFollowupReminderScheduler();
   ngStartAssessmentAutoReleaseScheduler();
+  ngStartAssessmentGeneratorScheduler();
   ngStartWeakFlashcardAutomationScheduler();
   ngStartZoomRecordingRecoveryScheduler();
   ngStartContentOperationsScheduler();
