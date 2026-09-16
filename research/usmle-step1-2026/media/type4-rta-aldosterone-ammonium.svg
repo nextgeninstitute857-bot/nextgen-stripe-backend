@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+<title id="title">Type IV renal tubular acidosis — original AylaMed teaching diagram</title>
+<desc id="desc">Explain type IV RTA through reduced aldosterone effect, hyperkalemia-mediated suppression of ammoniagenesis, and low urinary ammonium despite urine pH below 5.5.</desc>
+<style>
+.bg{fill:#f7f9fc} .frame{fill:#fff;stroke:#26364a;stroke-width:2.5} .panel{fill:#fff;stroke:#315a8b;stroke-width:2}
+.iconfill{fill:#e9f1ff;stroke:#315a8b;stroke-width:3} .icon{fill:none;stroke:#315a8b;stroke-width:7;stroke-linecap:round;stroke-linejoin:round}
+.alertfill{fill:#b13b3b} .title{font:700 34px Arial;fill:#172536} .subtitle{font:600 18px Arial;fill:#315a8b}
+.body{font:18px Arial;fill:#172536} .small{font:600 14px Arial;fill:#5a6675}
+.num{fill:#315a8b} .numtext{font:700 18px Arial;fill:#fff} .arrow{stroke:#315a8b;stroke-width:5} .arrowfill{fill:#315a8b}
+</style>
+<rect width="1200" height="720" class="bg"/>
+<rect x="25" y="25" width="1150" height="670" rx="30" class="frame"/>
+<text x="65" y="80" class="title">Type IV renal tubular acidosis</text>
+<text x="65" y="120" class="subtitle" text-anchor="start">Hypoaldosteronism, hyperkalemia, and reduced ammonium excretion</text>
+<rect x="65" y="235" width="255" height="300" rx="22" fill="#e9f1ff" stroke="#315a8b" stroke-width="2"/>
+<circle cx="190" cy="350" r="65" class="iconfill"/><path d="M135 350 H245 M190 295 V405" class="icon"/>
+<text x="192" y="485" class="small" text-anchor="middle">ORIGINAL MECHANISM MAP</text>
+<rect x="365" y="235" width="235" height="300" rx="22" class="panel"/><circle cx="403" cy="280" r="22" class="num"/><text x="403" y="287" class="numtext" text-anchor="middle">1</text><text x="390" y="345" class="body" text-anchor="start">Low aldosterone effect</text><text x="390" y="372" class="body" text-anchor="start">reduces ENaC-driven</text><text x="390" y="399" class="body" text-anchor="start">voltage</text><path d="M605 385 H623" class="arrow"/><path d="M623 385 l-14 -10 v20 z" class="arrowfill"/><rect x="630" y="235" width="235" height="300" rx="22" class="panel"/><circle cx="668" cy="280" r="22" class="num"/><text x="668" y="287" class="numtext" text-anchor="middle">2</text><text x="655" y="345" class="body" text-anchor="start">Potassium retention</text><text x="655" y="372" class="body" text-anchor="start">produces hyperkalemia</text><path d="M870 385 H888" class="arrow"/><path d="M888 385 l-14 -10 v20 z" class="arrowfill"/><rect x="895" y="235" width="235" height="300" rx="22" class="panel"/><circle cx="933" cy="280" r="22" class="num"/><text x="933" y="287" class="numtext" text-anchor="middle">3</text><text x="920" y="345" class="body" text-anchor="start">Hyperkalemia suppresses</text><text x="920" y="372" class="body" text-anchor="start">NH3 generation and NH4</text><text x="920" y="399" class="body" text-anchor="start">excretion</text>
+<text x="600" y="650" class="small" text-anchor="middle">AylaMed original SVG • private research draft • not for publication</text>
+</svg>

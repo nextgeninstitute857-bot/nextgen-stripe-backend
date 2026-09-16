@@ -1,0 +1,90 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b002-03",
+  "created_at": "2026-08-04T02:23:00+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "copyright_policy": {
+    "origin": "de_novo_from_official_blueprint_and_public_medical_sources",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_media_used": false,
+    "similarity_review_required": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-REN-ACID-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Respiratory & Renal/Urinary Systems",
+        "subsystem": "Acid-base integration",
+        "topic": "Chronic respiratory acidosis",
+        "subtopic": "Renal ammoniagenesis and new bicarbonate generation"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 63-year-old man with severe chronic obstructive pulmonary disease is clinically stable. Arterial blood gas analysis shows pH 7.36, PCO<sub>2</sub> 60 mm Hg, and HCO<sub>3</sub><sup>−</sup> 33 mEq/L. The accompanying graph shows the expected bicarbonate response to sustained hypercapnia. Which renal adaptation is most important for producing this pattern?</p>",
+      "options": [
+        {
+          "id": 5,
+          "text_html": "Increased chloride reabsorption in exchange for bicarbonate secretion by type B intercalated cells"
+        },
+        {
+          "id": 1,
+          "text_html": "Increased proximal-tubule glutamine metabolism with greater NH<sub>4</sub><sup>+</sup> excretion and generation of new bicarbonate"
+        },
+        {
+          "id": 4,
+          "text_html": "Reduced proximal bicarbonate reabsorption caused by inhibition of carbonic anhydrase"
+        },
+        {
+          "id": 2,
+          "text_html": "Decreased distal hydrogen secretion with increased urinary bicarbonate loss"
+        },
+        {
+          "id": 3,
+          "text_html": "Immediate buffering of hydrogen ions by intracellular proteins without a change in renal acid excretion"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Chronic hypercapnia lowers the bicarbonate-to-PCO<sub>2</sub> ratio. Over several days, the kidneys increase net acid excretion, especially as ammonium generated from proximal-tubule glutamine metabolism, and increase bicarbonate reabsorption and new bicarbonate generation. This raises plasma bicarbonate and moves pH toward normal without fully correcting the primary respiratory disorder.</p>",
+      "wrong_choice_explanations": {
+        "2": "Chronic respiratory acidosis increases, rather than decreases, renal hydrogen secretion and bicarbonate conservation.",
+        "3": "Nonbicarbonate buffering contributes to the small acute rise in bicarbonate but cannot explain the larger chronic renal compensation.",
+        "4": "Reduced bicarbonate reabsorption would worsen acidemia.",
+        "5": "Type B intercalated cells secrete bicarbonate during alkalosis; chronic respiratory acidosis favors acid secretion by type A intercalated cells."
+      },
+      "educational_objective": "Renal compensation for chronic respiratory acidosis requires increased ammonium excretion, titratable acid excretion, bicarbonate reabsorption, and new bicarbonate generation.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/chronic-respiratory-acidosis-compensation.svg",
+          "placement": "question",
+          "type": "original_vector_graph",
+          "alt_text": "Graph comparing the small acute and larger chronic rise in plasma bicarbonate as arterial carbon dioxide increases.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_medical_reference",
+          "citation": "StatPearls. Respiratory Acidosis. NCBI Bookshelf. Updated 2023.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK482430/"
+        },
+        {
+          "type": "peer_reviewed_review",
+          "citation": "Berend K, de Vries APJ, Gans ROB. Physiological approach to assessment of acid-base disturbances. N Engl J Med. 2014;371:1434-1445.",
+          "doi": "10.1056/NEJMra1003327"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

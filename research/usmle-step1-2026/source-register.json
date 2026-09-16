@@ -1,0 +1,124 @@
+{
+  "schema_version": "aylamed-usmle-research-source-register-v1",
+  "updated_at": "2026-08-04T01:35:00+05:00",
+  "exam_track": "usmle-step-1",
+  "rules": {
+    "authoritative_sources_define_coverage": true,
+    "social_sources_are_unverified_signals_only": true,
+    "proprietary_qbank_content_may_not_be_copied_or_paraphrased": true,
+    "all_generated_medical_claims_require_verification": true
+  },
+  "sources": [
+    {
+      "id": "usmle-content-outline-2026",
+      "type": "official_blueprint",
+      "publisher": "USMLE / FSMB / NBME",
+      "title": "USMLE Content Outline (2026)",
+      "url": "https://www.usmle.org/sites/default/files/2022-01/USMLE_Content_Outline_0.pdf",
+      "authority": "primary",
+      "use": [
+        "system coverage",
+        "topic coverage",
+        "special population priorities",
+        "emerging content signals"
+      ],
+      "notes": "Public-release outline. It explicitly highlights geriatric medicine, nutrition, prescription-drug use, veterans and military families, gender-affirming care, and patients with disabilities."
+    },
+    {
+      "id": "usmle-step1-specifications-2026",
+      "type": "official_exam_specification",
+      "publisher": "USMLE",
+      "title": "Step 1 Exam Content and Specifications",
+      "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications",
+      "authority": "primary",
+      "use": [
+        "system weighting",
+        "discipline weighting",
+        "competency weighting",
+        "media interpretation requirement"
+      ],
+      "notes": "Lists Nutrition at 15-20%, Communication and Interpersonal Skills at 6-9%, and confirms emphasis on graphic, tabular, gross-pathology, microscopic, and specimen interpretation."
+    },
+    {
+      "id": "usmle-nutrition-enhancement-2026",
+      "type": "official_change_announcement",
+      "publisher": "USMLE",
+      "title": "Enhancements to Nutrition Content on USMLE Step Exams Coming in June 2026",
+      "url": "https://www.usmle.org/enhancements-nutrition-content-usmle-step-exams-coming-june-2026",
+      "authority": "primary",
+      "use": [
+        "2026 change detection",
+        "nutrition priority",
+        "score-report category context"
+      ],
+      "notes": "Confirms enhanced nutrition-science content across all three Step exams starting June 2026."
+    },
+    {
+      "id": "usmle-step1-software-2026",
+      "type": "official_delivery_change",
+      "publisher": "USMLE",
+      "title": "Test Delivery Software Updates in Place for Step 1",
+      "url": "https://www.usmle.org/test-delivery-software-updates-place-step-1",
+      "authority": "primary",
+      "use": [
+        "practice-mode timing",
+        "image contrast testing",
+        "interface parity"
+      ],
+      "notes": "From May 14, 2026, Step 1 uses fourteen 30-minute blocks, no more than 20 items per block, and includes per-image contrast adjustment. Content, total item count, and total exam length remain unchanged."
+    },
+    {
+      "id": "usmle-practice-analysis-2026",
+      "type": "official_future_blueprint_signal",
+      "publisher": "USMLE",
+      "title": "USMLE Program Conducts Practice Analysis Study",
+      "url": "https://www.usmle.org/usmle-program-conducts-practice-analysis-study",
+      "authority": "primary",
+      "use": [
+        "future change watch"
+      ],
+      "notes": "The 2026 practice-analysis study may inform later blueprint updates; it does not establish new current testable content by itself."
+    },
+    {
+      "id": "jama-nutrition-competencies-2024",
+      "type": "peer_reviewed_consensus",
+      "publisher": "JAMA Network Open",
+      "title": "Proposed Nutrition Competencies for Medical Students and Physician Trainees: A Consensus Statement",
+      "url": "https://jamanetwork.com/journals/jamanetworkopen/fullarticle/2824217",
+      "authority": "peer_reviewed",
+      "use": [
+        "nutrition learning objectives",
+        "food insecurity",
+        "nutrition assessment",
+        "culturally sensitive counseling",
+        "multidisciplinary nutrition care"
+      ],
+      "notes": "USMLE states that the 2026 nutrition enhancement aligns with evidence-based competencies including this consensus statement."
+    },
+    {
+      "id": "reddit-step1-apr-2026-preparation-signal",
+      "type": "social_signal",
+      "publisher": "Reddit r/step1",
+      "title": "What to do in the last 20-30 days before Step 1",
+      "url": "https://ca.reddit.com/r/step1/duplicates/1sjglf6/what_to_do_in_the_last_2030_days_before_step_1/",
+      "authority": "unverified_anecdote",
+      "use": [
+        "candidate emphasis signal only"
+      ],
+      "notes": "Mentions ethics and communication as useful preparation areas. This does not prove exam frequency and must not determine coverage without official support."
+    },
+    {
+      "id": "osmosis-step1-guide-2026",
+      "type": "educational_review",
+      "publisher": "Osmosis",
+      "title": "The Breakdown of USMLE Step 1: What You Need to Know",
+      "url": "https://www.osmosis.org/blog/the-breakdown-of-usmle-step-1-what-you-need-to-know",
+      "authority": "secondary",
+      "use": [
+        "question-format cross-check",
+        "multimedia and data-interpretation signal"
+      ],
+      "notes": "Secondary educational source; official USMLE materials remain controlling."
+    }
+  ]
+}

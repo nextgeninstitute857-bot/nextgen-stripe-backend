@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+<title id="title">Glioblastoma — original AylaMed teaching diagram</title>
+<desc id="desc">Hypoxia stabilizes HIF-1α. VEGF → glomeruloid vessels.</desc>
+<style>
+.bg{fill:#f7f9fc}.panel{fill:#fff;stroke:#26364a;stroke-width:2}.accent{fill:#e9f1ff;stroke:#315a8b;stroke-width:2}
+.title{font:700 34px Arial;fill:#172536}.subtitle{font:700 21px Arial;fill:#315a8b}.body{font:18px Arial;fill:#172536}.small{font:600 15px Arial;fill:#5a6675}
+</style>
+<rect width="1200" height="720" class="bg"/>
+<rect x="30" y="30" width="1140" height="660" rx="28" class="panel"/>
+<text x="70" y="90" class="title">Glioblastoma</text>
+<text x="70" y="135" class="small">Original mechanism-focused Step 1 teaching graphic</text>
+<rect x="70" y="180" width="310" height="390" rx="24" class="accent"/>
+<path d="M130 300 C116 244 165 210 214 230 C256 196 320 224 316 278 C356 312 324 378 278 374 C246 414 178 400 166 360 C124 356 103 322 130 300Z" fill="#dce9f8" stroke="#315a8b" stroke-width="5"/><circle cx="245" cy="303" r="38" fill="#f2bcbc"/><path d="M214 304 C232 285 256 286 278 305" stroke="#a13d3d" stroke-width="6" fill="none"/>
+<rect x="420" y="180" width="330" height="390" rx="24" class="panel"/>
+<text x="470" y="230" class="subtitle">Mechanism</text><text x="470" y="285" class="body">Hypoxia stabilizes HIF-1α</text>
+<path d="M755 375 H805" stroke="#315a8b" stroke-width="7"/><path d="M805 375 l-20 -14 v28 z" fill="#315a8b"/>
+<rect x="820" y="180" width="310" height="390" rx="24" class="panel"/>
+<text x="840" y="230" class="subtitle">Key inference</text><text x="840" y="285" class="body">VEGF → glomeruloid</text><text x="840" y="319" class="body">vessels</text>
+<text x="600" y="645" text-anchor="middle" class="small">AylaMed original SVG — private research draft — publication blocked</text>
+</svg>

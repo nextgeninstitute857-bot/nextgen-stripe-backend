@@ -1,0 +1,29 @@
+{
+  "schema_version": "aylamed-installation-validation-record-v1",
+  "batch_id": "usmle-step1-2026-b013-in-chat-original-20",
+  "status": "private_branch_validation",
+  "checked_at": "2026-08-04T20:54:00+05:00",
+  "expected_question_count": 20,
+  "expected_media_count": 20,
+  "answer_position_counts": {
+    "A": 4,
+    "B": 4,
+    "C": 4,
+    "D": 4,
+    "E": 4
+  },
+  "checks": {
+    "json_parse": true,
+    "five_option_single_best_answer": true,
+    "five_level_taxonomy": true,
+    "two_or_more_references": true,
+    "all_media_paths_present": true,
+    "svg_xml_parse": true,
+    "authored_position_balance": true,
+    "max_same_position_run_lte_3": true,
+    "student_shuffle_required": true,
+    "publication_blocked": true,
+    "full_external_similarity_scan": "pending_raw_zip_mount"
+  },
+  "notes": "This record validates repository structure only. It is not clinician approval and does not authorize import or publication."
+}

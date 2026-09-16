@@ -1,0 +1,273 @@
+{
+  "schema_version": "aylamed-coverage-matrix-v1",
+  "batch_id": "usmle-step1-2026-b011-in-chat-20",
+  "status": "private_research_matrix",
+  "publication_allowed": false,
+  "source_export": {
+    "records": 7937,
+    "unique_title_clusters": 2647,
+    "explicit_media_candidates": 786
+  },
+  "entries": [
+    {
+      "draft_id": "AY26-B011-PULM-UIP-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Interstitial and restrictive lung disease",
+        "topic": "Idiopathic pulmonary fibrosis",
+        "subtopic": "Usual interstitial pneumonia, fibroblastic foci, and basal subpleural honeycombing"
+      },
+      "learning_objective": "Usual interstitial pneumonia combines basal subpleural honeycombing and temporally heterogeneous fibroblastic foci; TGF-beta is a central profibrotic mediator.",
+      "media_path": "research/usmle-step1-2026/media/uip-honeycomb-fibroblastic-foci.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B011-VASC-IH-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Vascular tumors",
+        "topic": "Infantile hemangioma",
+        "subtopic": "GLUT1-positive proliferative and involution phases"
+      },
+      "learning_objective": "Infantile hemangiomas are GLUT1-positive endothelial tumors that appear after birth, proliferate rapidly in infancy, and then involute.",
+      "media_path": "research/usmle-step1-2026/media/infantile-hemangioma-growth-glut1.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-ONC-HPVOP-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Head and neck oncology",
+        "topic": "Oropharyngeal squamous-cell carcinoma",
+        "subtopic": "HPV16 E6/E7, p53/RB disruption, and p16 overexpression"
+      },
+      "learning_objective": "HPV E7 inactivates RB, releases E2F, and produces compensatory p16 overexpression; E6 promotes p53 degradation.",
+      "media_path": "research/usmle-step1-2026/media/hpv-oropharynx-e6-e7-p16.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B011-RENAL-PUV-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Congenital urinary obstruction",
+        "topic": "Posterior urethral valves",
+        "subtopic": "Bladder outlet obstruction, bilateral hydronephrosis, and oligohydramnios"
+      },
+      "learning_objective": "Severe posterior urethral obstruction lowers fetal urine production, causing oligohydramnios and secondary pulmonary hypoplasia.",
+      "media_path": "research/usmle-step1-2026/media/posterior-urethral-valves-keyhole.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-ACD-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Inflammatory dermatoses",
+        "topic": "Allergic contact dermatitis",
+        "subtopic": "Hapten-specific type IV delayed hypersensitivity"
+      },
+      "learning_objective": "Allergic contact dermatitis is a type IV reaction in which haptens modify skin proteins, dendritic cells prime T cells, and memory T cells drive delayed inflammation on re-exposure.",
+      "media_path": "research/usmle-step1-2026/media/allergic-contact-dermatitis-hapten.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-MEL-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Cutaneous malignancy",
+        "topic": "Melanoma",
+        "subtopic": "Breslow depth and vertical growth as prognostic determinants"
+      },
+      "learning_objective": "Breslow thickness quantifies vertical invasion and is a major prognostic determinant for localized cutaneous melanoma.",
+      "media_path": "research/usmle-step1-2026/media/melanoma-breslow-depth.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-RENAL-FANCONI-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Tubular physiology",
+        "topic": "Proximal tubule transport",
+        "subtopic": "Fanconi syndrome and generalized proximal solute wasting"
+      },
+      "learning_objective": "Fanconi syndrome localizes to the proximal tubule and causes urinary loss of glucose, phosphate, amino acids, bicarbonate, and low-molecular-weight proteins.",
+      "media_path": "research/usmle-step1-2026/media/fanconi-proximal-solute-wasting.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-MSK-OSTEOSARC-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Primary bone tumors",
+        "topic": "Osteosarcoma",
+        "subtopic": "Malignant osteoid, metaphyseal growth, and RB1 association"
+      },
+      "learning_objective": "Osteosarcoma is a metaphyseal malignant bone tumor that produces osteoid and is associated with RB1 and TP53 pathway defects.",
+      "media_path": "research/usmle-step1-2026/media/osteosarcoma-sunburst-osteoid.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-HEME-EBV-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Viral lymphoproliferative infection",
+        "topic": "Epstein-Barr virus infectious mononucleosis",
+        "subtopic": "B-cell infection and reactive CD8-positive atypical lymphocytes"
+      },
+      "learning_objective": "EBV uses CD21 to infect B cells, while the atypical lymphocytes of infectious mononucleosis are predominantly reactive CD8-positive T cells.",
+      "media_path": "research/usmle-step1-2026/media/ebv-cd21-reactive-cd8.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-HEME-KAPOSI-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Opportunistic neoplasia",
+        "topic": "Kaposi sarcoma",
+        "subtopic": "HHV-8 spindle-cell vascular proliferation in immunodeficiency"
+      },
+      "learning_objective": "Kaposi sarcoma is an HHV-8-associated spindle-cell vascular neoplasm with slit-like spaces and red-cell extravasation, especially in immunodeficiency.",
+      "media_path": "research/usmle-step1-2026/media/kaposi-hhv8-spindle-slits.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-MSK-OA-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Degenerative joint disease",
+        "topic": "Osteoarthritis",
+        "subtopic": "Articular cartilage loss, subchondral sclerosis, and osteophyte formation"
+      },
+      "learning_objective": "Osteoarthritis results from articular-cartilage degeneration and subchondral remodeling, producing joint-space narrowing, sclerosis, cysts, and osteophytes.",
+      "media_path": "research/usmle-step1-2026/media/osteoarthritis-joint-space-osteophyte.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-AK-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Premalignant epidermal lesions",
+        "topic": "Actinic keratosis",
+        "subtopic": "UVB-induced keratinocyte dysplasia and progression to squamous carcinoma"
+      },
+      "learning_objective": "Actinic keratosis is UV-induced keratinocyte dysplasia confined to the epidermis and is a precursor of cutaneous squamous-cell carcinoma.",
+      "media_path": "research/usmle-step1-2026/media/actinic-keratosis-lower-epidermis.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-SCABIES-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Ectoparasitic disease",
+        "topic": "Scabies",
+        "subtopic": "Sarcoptes burrows and delayed hypersensitivity pruritus"
+      },
+      "learning_objective": "Scabies produces nocturnal pruritus and burrows; symptoms reflect delayed hypersensitivity to mites and their products after sensitization.",
+      "media_path": "research/usmle-step1-2026/media/scabies-burrow-mite-eggs.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-PULM-ATELECT-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Lung-volume loss",
+        "topic": "Obstructive atelectasis",
+        "subtopic": "Resorption distal to airway obstruction and ipsilateral mediastinal shift"
+      },
+      "learning_objective": "Airway obstruction causes distal gas resorption and lung-volume loss, pulling the mediastinum toward the atelectatic side.",
+      "media_path": "research/usmle-step1-2026/media/obstructive-atelectasis-shift-toward.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-KELOID-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Wound healing",
+        "topic": "Keloid scar",
+        "subtopic": "TGF-beta-driven collagen deposition beyond original wound boundaries"
+      },
+      "learning_objective": "Keloids are TGF-beta-associated fibroproliferative scars that extend beyond the original wound; hypertrophic scars remain confined to it.",
+      "media_path": "research/usmle-step1-2026/media/keloid-vs-hypertrophic-boundary.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-NEURO-ERB-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Peripheral nerve anatomy",
+        "topic": "Upper trunk brachial plexopathy",
+        "subtopic": "C5-C6 injury and Erb-Duchenne posture"
+      },
+      "learning_objective": "Erb-Duchenne palsy localizes to the C5-C6 upper trunk and causes loss of shoulder abduction/external rotation and elbow flexion/supination.",
+      "media_path": "research/usmle-step1-2026/media/brachial-plexus-upper-trunk-erb.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-PULM-A1AT-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Genetic emphysema and liver disease",
+        "topic": "Alpha-1 antitrypsin deficiency",
+        "subtopic": "Unopposed neutrophil elastase and misfolded hepatic protein retention"
+      },
+      "learning_objective": "Alpha-1 antitrypsin deficiency causes emphysema through unopposed elastase and liver disease through intracellular retention of misfolded protein.",
+      "media_path": "research/usmle-step1-2026/media/alpha1-antitrypsin-lung-liver.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B011-GI-CROHN-OXALATE-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Inflammatory bowel disease",
+        "topic": "Crohn disease",
+        "subtopic": "Terminal ileal bile-salt loss, fat malabsorption, and calcium oxalate stones"
+      },
+      "learning_objective": "Terminal-ileal bile-salt loss causes fat malabsorption; fatty acids bind calcium, freeing oxalate for colonic absorption and causing enteric hyperoxaluria.",
+      "media_path": "research/usmle-step1-2026/media/crohn-enteric-hyperoxaluria.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B011-ENDO-PITMACRO-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Pituitary tumors",
+        "topic": "Pituitary macroadenoma",
+        "subtopic": "Optic-chiasm compression and bitemporal hemianopia"
+      },
+      "learning_objective": "Pituitary macroadenomas compress crossing nasal retinal fibers in the optic chiasm, producing bitemporal hemianopia.",
+      "media_path": "research/usmle-step1-2026/media/pituitary-macroadenoma-chiasm.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B011-GI-PANCREATITIS-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Pancreatic injury",
+        "topic": "Acute pancreatitis",
+        "subtopic": "Premature trypsin activation, fat necrosis, and hypocalcemia"
+      },
+      "learning_objective": "Acute pancreatitis causes enzyme-mediated fat necrosis; released fatty acids bind calcium to form soaps, producing hypocalcemia.",
+      "media_path": "research/usmle-step1-2026/media/acute-pancreatitis-saponification.svg",
+      "difficulty": "moderate"
+    }
+  ]
+}

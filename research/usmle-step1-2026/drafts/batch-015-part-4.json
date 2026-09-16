@@ -1,0 +1,309 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b015-in-chat-original-20-part-4",
+  "created_at": "2026-08-04T23:39:08+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "generation_method": "in_chat_original_generation_with_backend_coverage_signals_and_full_zip_lexical_screen",
+  "copyright_policy": {
+    "origin": "de_novo_from_current_public_medical_sources_and_private_coverage_signals",
+    "backend_export_used_for": "topic frequency and lexical similarity screening only",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_options_used": false,
+    "proprietary_qbank_explanations_used": false,
+    "proprietary_qbank_media_used": false,
+    "full_export_similarity_review_completed": true,
+    "human_semantic_review_required": true
+  },
+  "quality_controls": {
+    "distinct_learning_objectives": true,
+    "plausible_distractors_required": true,
+    "wrong_choice_explanations_required": true,
+    "authoritative_references_required": true,
+    "original_media_required": true,
+    "correct_answer_ids_server_side": true,
+    "publication_blocked": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-B015-ENDO-ACROMEGALY-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Pituitary hormone excess",
+        "topic": "Acromegaly",
+        "subtopic": "IGF-1 elevation and failure of growth-hormone suppression after oral glucose"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 46-year-old man has progressive enlargement of his hands and feet, increased hat size, prognathism, diaphoresis, sleep apnea, and fasting hyperglycemia. Serum insulin-like growth factor 1 is above the age-adjusted range. Which result is expected during an oral glucose tolerance test?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Insulin-like growth factor 1 falls to an undetectable concentration within 30 minutes"
+        },
+        {
+          "id": 2,
+          "text_html": "Prolactin is completely suppressed in every affected patient"
+        },
+        {
+          "id": 3,
+          "text_html": "Growth hormone remains inadequately suppressed or may paradoxically rise despite hyperglycemia"
+        },
+        {
+          "id": 4,
+          "text_html": "Growth hormone-releasing hormone rises because hepatic feedback is absent"
+        },
+        {
+          "id": 5,
+          "text_html": "Cortisol fails to suppress after low-dose dexamethasone"
+        }
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>In healthy people, oral glucose suppresses growth-hormone secretion. A somatotroph adenoma secretes GH autonomously, so GH fails to suppress to the assay-specific nadir and can paradoxically increase. IGF-1 is the preferred screening measurement because it is more stable throughout the day.</p>",
+      "wrong_choice_explanations": {
+        "1": "IGF-1 does not normally fall immediately after a glucose load and is used as an integrated marker of GH activity.",
+        "2": "Prolactin may be co-secreted by some pituitary adenomas, but complete suppression is not a diagnostic feature.",
+        "4": "Most acromegaly is due to autonomous pituitary GH secretion rather than compensatory elevation of GHRH.",
+        "5": "Failure of dexamethasone suppression evaluates hypercortisolism, not acromegaly."
+      },
+      "educational_objective": "Use elevated IGF-1 and failure of oral-glucose-mediated GH suppression to confirm autonomous growth-hormone secretion in acromegaly.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/acromegaly-gh-igf1-glucose.svg",
+          "placement": "question",
+          "type": "original_vector_endocrine_dynamic_test",
+          "alt_text": "Use elevated IGF-1 and failure of oral-glucose-mediated GH suppression to confirm autonomous growth-hormone secretion in acromegaly.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "endocrine_reference",
+          "citation": "Acromegaly. Endotext. NCBI Bookshelf. Updated September 7, 2022. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK279097/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-REPRO-ENDOMETRIOSIS-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Gynecologic disorders",
+        "topic": "Endometriosis",
+        "subtopic": "Ectopic endometrial glands and stroma with cyclic hemorrhage"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 31-year-old woman has infertility, deep dyspareunia, and pelvic pain that peaks during menstruation. Examination reveals tender nodularity in the posterior cul-de-sac. Laparoscopy shows blue-black peritoneal implants and an ovarian cyst filled with dark brown fluid. Which microscopic finding establishes the diagnosis?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Chorionic villi with trophoblastic proliferation"
+        },
+        {
+          "id": 2,
+          "text_html": "Mucin-producing epithelium with ovarian stromal invasion"
+        },
+        {
+          "id": 3,
+          "text_html": "Noncaseating granulomas confined to the fallopian tubes"
+        },
+        {
+          "id": 4,
+          "text_html": "Ectopic endometrial glands and stroma accompanied by hemorrhage and hemosiderin-laden macrophages"
+        },
+        {
+          "id": 5,
+          "text_html": "Intersecting fascicles of benign smooth muscle without endometrial tissue"
+        }
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>Endometriosis is defined histologically by endometrial glands and stroma outside the uterine cavity. Repeated cyclic bleeding produces fibrosis, old blood, and hemosiderin-laden macrophages, accounting for blue-black implants and an ovarian endometrioma.</p>",
+      "wrong_choice_explanations": {
+        "1": "Chorionic villi indicate an intrauterine or ectopic gestation rather than endometriosis.",
+        "2": "Invasive mucinous epithelium suggests an epithelial ovarian neoplasm.",
+        "3": "Granulomatous salpingitis can impair fertility but does not cause cyclic hemorrhagic implants.",
+        "5": "Benign smooth-muscle fascicles describe leiomyoma."
+      },
+      "educational_objective": "Diagnose endometriosis by ectopic endometrial glands and stroma with cyclic hemorrhage, fibrosis, and hemosiderin-laden macrophages.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/endometriosis-ectopic-glands-hemosiderin.svg",
+          "placement": "question",
+          "type": "original_vector_gynecologic_histology",
+          "alt_text": "Diagnose endometriosis by ectopic endometrial glands and stroma with cyclic hemorrhage, fibrosis, and hemosiderin-laden macrophages.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "endocrine_reference",
+          "citation": "Endometriosis. Endotext. NCBI Bookshelf. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK278996/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-RENAL-LITHIUM-NDI-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Water-balance disorders",
+        "topic": "Lithium-induced nephrogenic diabetes insipidus",
+        "subtopic": "ENaC-mediated lithium entry and aquaporin-2 downregulation"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 44-year-old woman with bipolar disorder treated with lithium has polyuria, intense thirst, serum sodium of 149 mEq/L, and urine osmolality of 108 mOsm/kg. Urine osmolality changes minimally after desmopressin. Amiloride is added. Which action makes this drug particularly useful in this setting?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Inhibition of the sodium-potassium-chloride cotransporter in the thick ascending limb"
+        },
+        {
+          "id": 2,
+          "text_html": "Direct agonism of vasopressin V2 receptors"
+        },
+        {
+          "id": 3,
+          "text_html": "Inhibition of carbonic anhydrase in the proximal tubule"
+        },
+        {
+          "id": 4,
+          "text_html": "Antagonism of aldosterone at the mineralocorticoid receptor"
+        },
+        {
+          "id": 5,
+          "text_html": "Blockade of epithelial sodium channels, reducing lithium entry into collecting-duct principal cells and limiting aquaporin-2 loss"
+        }
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>Lithium enters collecting-duct principal cells largely through ENaC and disrupts vasopressin signaling, reducing aquaporin-2 abundance and water permeability. Amiloride blocks ENaC, lowers intracellular lithium exposure, and can attenuate lithium-induced nephrogenic diabetes insipidus.</p>",
+      "wrong_choice_explanations": {
+        "1": "Loop-diuretic inhibition of NKCC2 reduces the medullary gradient but does not specifically block lithium entry into principal cells.",
+        "2": "The kidney is resistant to vasopressin signaling, so direct V2 stimulation does not correct the underlying lithium effect.",
+        "3": "Carbonic-anhydrase inhibition causes bicarbonate diuresis and is not the targeted treatment for lithium entry.",
+        "4": "Mineralocorticoid-receptor antagonism does not prevent lithium passage through ENaC."
+      },
+      "educational_objective": "Explain lithium-induced nephrogenic diabetes insipidus through ENaC entry into principal cells, aquaporin-2 downregulation, and the targeted benefit of amiloride.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/lithium-enac-aqp2-amiloride.svg",
+          "placement": "question",
+          "type": "original_vector_collecting_duct_pharmacology",
+          "alt_text": "Explain lithium-induced nephrogenic diabetes insipidus through ENaC entry into principal cells, aquaporin-2 downregulation, and the targeted benefit of amiloride.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "peer_reviewed_mechanistic_study",
+          "citation": "Kortenoeven MLA et al. Amiloride blocks lithium entry through the sodium channel thereby attenuating the resultant nephrogenic diabetes insipidus. Kidney Int. 2009;76:44-53.",
+          "url": "https://pubmed.ncbi.nlm.nih.gov/19367330/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-CV-DIGOXIN-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Cardiovascular pharmacology and toxicology",
+        "topic": "Digoxin toxicity",
+        "subtopic": "Sodium-potassium ATPase inhibition and extracellular potassium shift"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 78-year-old man with chronic kidney disease takes digoxin for atrial fibrillation. After several days of poor oral intake, he develops nausea, confusion, yellow-tinted vision, bradycardia, and frequent ventricular ectopy. Serum potassium is 6.3 mEq/L. Which mechanism most directly accounts for the hyperkalemia?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Inhibition of sodium-potassium ATPase reduces active potassium uptake into cells"
+        },
+        {
+          "id": 2,
+          "text_html": "Opening of ATP-sensitive potassium channels causes rapid cellular potassium efflux"
+        },
+        {
+          "id": 3,
+          "text_html": "Suppression of aldosterone synthesis causes isolated distal potassium retention"
+        },
+        {
+          "id": 4,
+          "text_html": "Immune-mediated lysis of skeletal muscle releases intracellular potassium"
+        },
+        {
+          "id": 5,
+          "text_html": "Competitive inhibition of renal potassium secretion by digoxin metabolites"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Digoxin binds and inhibits the sodium-potassium ATPase. In acute or severe toxicity, reduced pump-mediated potassium entry into cells produces an extracellular potassium shift; hyperkalemia correlates with poisoning severity. The same pump inhibition raises intracellular sodium, decreases sodium-calcium exchange, and increases intracellular calcium, contributing to triggered arrhythmias.</p>",
+      "wrong_choice_explanations": {
+        "2": "ATP-sensitive potassium-channel opening is not digoxin's mechanism.",
+        "3": "Digoxin toxicity does not primarily suppress aldosterone production.",
+        "4": "Rhabdomyolysis is not required to explain the potassium elevation.",
+        "5": "The principal mechanism is transcellular redistribution from pump inhibition rather than competitive blockade of tubular secretion."
+      },
+      "educational_objective": "Connect severe digoxin toxicity to sodium-potassium ATPase inhibition, hyperkalemia, intracellular calcium loading, and arrhythmogenesis.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/digoxin-na-k-atpase-fab.svg",
+          "placement": "question",
+          "type": "original_vector_cardiac_glycoside_pathway",
+          "alt_text": "Connect severe digoxin toxicity to sodium-potassium ATPase inhibition, hyperkalemia, intracellular calcium loading, and arrhythmogenesis.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Cardiac Glycoside and Digoxin Toxicity. StatPearls. NCBI Bookshelf. Updated March 25, 2025. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK459165/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

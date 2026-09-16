@@ -1,0 +1,464 @@
+{
+  "schema_version": "aylamed-backend-driven-gap-queue-v1",
+  "batch_id": "usmle-step1-2026-b012-in-chat-20-queue",
+  "created_at": "2026-08-04T18:50:00+05:00",
+  "status": "private_research_queue",
+  "publication_allowed": false,
+  "source_export": {
+    "records": 7937,
+    "unique_title_clusters": 2647,
+    "explicit_media_candidates": 786,
+    "use": "coverage-frequency, media-priority, and later close-paraphrase screening only"
+  },
+  "selection_controls": {
+    "target_questions": 20,
+    "all_objectives_distinct": true,
+    "avoid_batches": "001-011",
+    "full_stem_similarity_check_required_before_commit": true,
+    "proprietary_text_or_media_used": false,
+    "original_media_required": true,
+    "medical_reference_verification_required": true
+  },
+  "entries": [
+    {
+      "rank": 1,
+      "backend_title": "Aortic dissection",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Aortic disease",
+        "topic": "Aortic dissection",
+        "subtopic": "Stanford classification, intimal tear, and branch-vessel malperfusion"
+      },
+      "learning_objective": "Localize an ascending-aortic intimal tear as Stanford type A disease and connect propagation into branch vessels or the aortic root to pulse deficits, neurologic ischemia, aortic regurgitation, and pericardial tamponade.",
+      "media_spec": "Original CT-angiography-style aortic map showing an intimal flap, true and false lumens, ascending involvement, branch-vessel extension, and possible pericardial blood.",
+      "distinctness_note": "No prior draft targets aortic-dissection anatomy, classification, or malperfusion.",
+      "backend_evidence": {
+        "question_count": 11,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 1,
+        "radiology_count": 5,
+        "ecg_or_tracing_count": 6,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00003971"
+      }
+    },
+    {
+      "rank": 2,
+      "backend_title": "Pleural effusion",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Pleural disease",
+        "topic": "Pleural effusion",
+        "subtopic": "Light criteria, transudates, exudates, and pseudoexudates after diuresis"
+      },
+      "learning_objective": "Classify pleural fluid with Light criteria and recognize that diuresed heart-failure effusions can be borderline pseudoexudates requiring serum–pleural albumin or protein gradients.",
+      "media_spec": "Original paired chest-radiograph meniscus schematic and serum-versus-pleural-fluid table with Light-criteria calculations.",
+      "distinctness_note": "No prior draft tests pleural-fluid classification or pseudoexudates.",
+      "backend_evidence": {
+        "question_count": 13,
+        "explicit_media_required_count": 1,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 11,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00004075"
+      }
+    },
+    {
+      "rank": 3,
+      "backend_title": "ARDS",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Acute lung injury",
+        "topic": "Acute respiratory distress syndrome",
+        "subtopic": "Diffuse alveolar damage, hyaline membranes, and reduced compliance"
+      },
+      "learning_objective": "Connect endothelial and epithelial injury in ARDS to protein-rich alveolar edema, hyaline membranes, shunt physiology, bilateral opacities, and low lung compliance.",
+      "media_spec": "Original alveolar-capillary injury diagram paired with a pressure-volume curve and bilateral air-space opacity schematic.",
+      "distinctness_note": "Prior neonatal RDS content does not cover adult diffuse alveolar damage or ARDS physiology.",
+      "backend_evidence": {
+        "question_count": 14,
+        "explicit_media_required_count": 1,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 8,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00000001"
+      }
+    },
+    {
+      "rank": 4,
+      "backend_title": "Scaphoid fracture",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Wrist trauma",
+        "topic": "Scaphoid fracture",
+        "subtopic": "Retrograde blood supply and proximal-pole avascular necrosis"
+      },
+      "learning_objective": "Explain why a displaced scaphoid waist fracture threatens the proximal pole through disruption of retrograde dorsal carpal blood flow, especially when initial radiographs are occult.",
+      "media_spec": "Original wrist and scaphoid vascular map with fracture levels, snuffbox localization, and proximal-pole perfusion arrows.",
+      "distinctness_note": "No prior draft targets scaphoid anatomy, occult fracture imaging, or retrograde perfusion.",
+      "backend_evidence": {
+        "question_count": 4,
+        "explicit_media_required_count": 4,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 4,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00004645"
+      }
+    },
+    {
+      "rank": 5,
+      "backend_title": "Renal calculi",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Nephrolithiasis",
+        "topic": "Infection stones",
+        "subtopic": "Urease-positive organisms, alkaline urine, and struvite staghorn calculi"
+      },
+      "learning_objective": "Link recurrent urinary infection by urease-positive bacteria to alkaline urine, ammonium magnesium phosphate precipitation, and branching staghorn calculi.",
+      "media_spec": "Original collecting-system staghorn stone schematic plus urease-driven urine-pH and crystal pathway.",
+      "distinctness_note": "Batch 011 covered enteric calcium oxalate stones, not infection-related struvite stones.",
+      "backend_evidence": {
+        "question_count": 8,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 3,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 1,
+        "example_student_qid": "NGQ-00005491"
+      }
+    },
+    {
+      "rank": 6,
+      "backend_title": "Nonhodgkin lymphoma",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Mature B-cell neoplasia",
+        "topic": "Burkitt lymphoma",
+        "subtopic": "MYC translocation, starry-sky histology, and high proliferative fraction"
+      },
+      "learning_objective": "Recognize Burkitt lymphoma by a MYC–immunoglobulin translocation, near-100% proliferative fraction, and tingible-body macrophages producing starry-sky histology.",
+      "media_spec": "Original jaw-or-abdominal mass map paired with MYC translocation and starry-sky histology schematics.",
+      "distinctness_note": "EBV mononucleosis was covered, but no prior draft targets MYC-driven Burkitt lymphoma.",
+      "backend_evidence": {
+        "question_count": 13,
+        "explicit_media_required_count": 2,
+        "microscopy_or_pathology_count": 12,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00003855"
+      }
+    },
+    {
+      "rank": 7,
+      "backend_title": "Acute promyelocytic leukemia",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Acute myeloid neoplasia",
+        "topic": "Acute promyelocytic leukemia",
+        "subtopic": "PML–RARA differentiation arrest, DIC, and all-trans retinoic acid"
+      },
+      "learning_objective": "Connect t(15;17) PML–RARA fusion to promyelocyte differentiation arrest, Auer-rod-rich cells, consumptive coagulopathy, and differentiation therapy with all-trans retinoic acid.",
+      "media_spec": "Original marrow smear schematic with abnormal promyelocytes and Auer rods plus coagulation trends and PML–RARA pathway.",
+      "distinctness_note": "No prior draft covers acute leukemia genetics, DIC, or differentiation therapy.",
+      "backend_evidence": {
+        "question_count": 6,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 5,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00000064"
+      }
+    },
+    {
+      "rank": 8,
+      "backend_title": "Amyloidosis",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Protein-misfolding disease",
+        "topic": "Systemic amyloidosis",
+        "subtopic": "Beta-pleated fibrils, Congo red binding, and apple-green birefringence"
+      },
+      "learning_objective": "Identify extracellular amyloid by Congo-red positivity and apple-green birefringence and distinguish immunoglobulin light-chain amyloid from inflammation-associated serum amyloid A deposition.",
+      "media_spec": "Original renal or cardiac tissue schematic showing extracellular deposits under ordinary and polarized light plus precursor-protein pathways.",
+      "distinctness_note": "No prior draft targets systemic amyloid structure, staining, or precursor classification.",
+      "backend_evidence": {
+        "question_count": 6,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 5,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005325"
+      }
+    },
+    {
+      "rank": 9,
+      "backend_title": "Malaria",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Protozoal blood infection",
+        "topic": "Plasmodium falciparum malaria",
+        "subtopic": "Multiple ring forms, banana-shaped gametocytes, and microvascular sequestration"
+      },
+      "learning_objective": "Recognize falciparum malaria on smear and connect PfEMP1-mediated cytoadherence and sequestration of infected erythrocytes to severe cerebral and multiorgan disease.",
+      "media_spec": "Original thin-smear panel with multiple rings and crescent gametocytes plus capillary sequestration schematic.",
+      "distinctness_note": "No prior draft covers malaria morphology or sequestration pathophysiology.",
+      "backend_evidence": {
+        "question_count": 14,
+        "explicit_media_required_count": 1,
+        "microscopy_or_pathology_count": 10,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00004504"
+      }
+    },
+    {
+      "rank": 10,
+      "backend_title": "Carcinoid tumors",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Neuroendocrine tumors",
+        "topic": "Carcinoid syndrome",
+        "subtopic": "Hepatic bypass, serotonin metabolism, and right-sided valvular fibrosis"
+      },
+      "learning_objective": "Explain why gastrointestinal neuroendocrine tumors usually cause systemic carcinoid syndrome only after hepatic metastasis and link circulating serotonin to right-sided valvular plaque formation.",
+      "media_spec": "Original gut–portal–liver pathway paired with flushing, urinary 5-HIAA, and tricuspid/pulmonic plaque schematics.",
+      "distinctness_note": "No prior draft targets neuroendocrine tumor hormone physiology or carcinoid heart disease.",
+      "backend_evidence": {
+        "question_count": 7,
+        "explicit_media_required_count": 2,
+        "microscopy_or_pathology_count": 4,
+        "radiology_count": 3,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00000160"
+      }
+    },
+    {
+      "rank": 11,
+      "backend_title": "Polycystic kidney disease",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Cystic renal disease",
+        "topic": "Autosomal dominant polycystic kidney disease",
+        "subtopic": "Primary-cilium signaling, bilateral cysts, and intracranial aneurysms"
+      },
+      "learning_objective": "Connect PKD1/PKD2 dysfunction in primary cilia to progressive bilateral renal cysts and recognize associated hepatic cysts and intracranial berry aneurysms.",
+      "media_spec": "Original renal-ultrasound-style cystic kidneys plus tubular primary-cilium and circle-of-Willis aneurysm diagrams.",
+      "distinctness_note": "No prior draft covers inherited cystic kidney disease or ciliary signaling.",
+      "backend_evidence": {
+        "question_count": 6,
+        "explicit_media_required_count": 2,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 6,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005032"
+      }
+    },
+    {
+      "rank": 12,
+      "backend_title": "Prostate cancer",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Male genitourinary oncology",
+        "topic": "Prostatic adenocarcinoma",
+        "subtopic": "Peripheral-zone origin and osteoblastic axial metastases"
+      },
+      "learning_objective": "Distinguish peripheral-zone prostatic adenocarcinoma from transition-zone benign hyperplasia and connect vertebral venous spread to osteoblastic axial skeletal metastases.",
+      "media_spec": "Original zonal prostate map and spine image schematic showing sclerotic metastases with an alkaline-phosphatase trend.",
+      "distinctness_note": "No prior draft targets prostate zonal anatomy or osteoblastic metastatic behavior.",
+      "backend_evidence": {
+        "question_count": 15,
+        "explicit_media_required_count": 2,
+        "microscopy_or_pathology_count": 6,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00000049"
+      }
+    },
+    {
+      "rank": 13,
+      "backend_title": "Histoplasmosis",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Endemic fungal infection",
+        "topic": "Histoplasmosis",
+        "subtopic": "Dimorphic fungus, intracellular yeast, and macrophage dissemination"
+      },
+      "learning_objective": "Recognize Histoplasma as a dimorphic fungus acquired from bird- or bat-contaminated soil whose small budding yeasts survive within macrophages and disseminate in impaired cellular immunity.",
+      "media_spec": "Original environmental-to-lung pathway, macrophage histology panel, and reticuloendothelial dissemination map.",
+      "distinctness_note": "Aspergillus and tuberculosis were covered, but no prior draft targets Histoplasma.",
+      "backend_evidence": {
+        "question_count": 7,
+        "explicit_media_required_count": 2,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 4,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005206"
+      }
+    },
+    {
+      "rank": 14,
+      "backend_title": "Hemorrhagic stroke",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Cerebrovascular disease",
+        "topic": "Hypertensive intracerebral hemorrhage",
+        "subtopic": "Charcot–Bouchard microaneurysms and deep-brain hemorrhage"
+      },
+      "learning_objective": "Link chronic hypertension to lipohyalinosis and Charcot–Bouchard microaneurysms in small penetrating arteries causing basal-ganglia, thalamic, pontine, or cerebellar hemorrhage.",
+      "media_spec": "Original noncontrast-CT-style basal-ganglia hemorrhage and penetrating-arteriole microaneurysm schematic.",
+      "distinctness_note": "Prior stroke drafts cover ischemic MCA localization, not hypertensive intracerebral hemorrhage.",
+      "backend_evidence": {
+        "question_count": 7,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 3,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00003942"
+      }
+    },
+    {
+      "rank": 15,
+      "backend_title": "Primary biliary cholangitis",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Cholestatic liver disease",
+        "topic": "Primary biliary cholangitis",
+        "subtopic": "Antimitochondrial antibodies and autoimmune small-duct destruction"
+      },
+      "learning_objective": "Recognize primary biliary cholangitis from cholestatic laboratory results, antimitochondrial antibodies, pruritus, and granulomatous destruction of intrahepatic small bile ducts.",
+      "media_spec": "Original intrahepatic bile-duct histology schematic with florid duct lesion plus cholestatic laboratory and antibody panel.",
+      "distinctness_note": "No prior draft targets autoimmune cholangiopathy or antimitochondrial antibodies.",
+      "backend_evidence": {
+        "question_count": 11,
+        "explicit_media_required_count": 2,
+        "microscopy_or_pathology_count": 6,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00004962"
+      }
+    },
+    {
+      "rank": 16,
+      "backend_title": "Neurocysticercosis",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Parasitic CNS infection",
+        "topic": "Neurocysticercosis",
+        "subtopic": "Parenchymal cysts, scolex, degeneration, and seizure-provoking inflammation"
+      },
+      "learning_objective": "Identify neurocysticercosis by cystic or ring-enhancing parenchymal lesions containing a scolex and explain why inflammatory degeneration commonly provokes seizures.",
+      "media_spec": "Original staged brain-imaging panel showing viable cyst, degenerating ring lesion, and calcified lesion with scolex.",
+      "distinctness_note": "No prior draft covers cestode CNS infection or lesion-stage imaging.",
+      "backend_evidence": {
+        "question_count": 5,
+        "explicit_media_required_count": 2,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 5,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005180"
+      }
+    },
+    {
+      "rank": 17,
+      "backend_title": "Constrictive Pericarditis",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Pericardial disease",
+        "topic": "Constrictive pericarditis",
+        "subtopic": "Rigid pericardium, ventricular interdependence, and discordant respiratory pressures"
+      },
+      "learning_objective": "Differentiate constrictive pericarditis from restrictive cardiomyopathy by a rigid pericardial shell, prominent ventricular interdependence, pericardial knock, and discordant respiratory ventricular pressure changes.",
+      "media_spec": "Original calcified-pericardium image and simultaneous ventricular-pressure tracing across inspiration.",
+      "distinctness_note": "Tamponade was covered, but no prior draft targets chronic constrictive physiology.",
+      "backend_evidence": {
+        "question_count": 5,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 0,
+        "radiology_count": 3,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005921"
+      }
+    },
+    {
+      "rank": 18,
+      "backend_title": "Atopic dermatitis",
+      "taxonomy": {
+        "system": "Musculoskeletal & Skin Systems",
+        "subsystem": "Inflammatory dermatoses",
+        "topic": "Atopic dermatitis",
+        "subtopic": "Filaggrin barrier dysfunction and type 2 immune inflammation"
+      },
+      "learning_objective": "Connect impaired epidermal barrier function, often involving filaggrin, to allergen penetration, type 2 cytokine signaling, pruritus, and age-dependent flexural eczema distribution.",
+      "media_spec": "Original epidermal-barrier cross-section with filaggrin deficiency and a pediatric-versus-adult distribution map.",
+      "distinctness_note": "Allergic contact dermatitis was covered, but no prior draft targets atopic barrier biology.",
+      "backend_evidence": {
+        "question_count": 11,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005010"
+      }
+    },
+    {
+      "rank": 19,
+      "backend_title": "Abetalipoproteinemia",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Lipid absorption disorders",
+        "topic": "Abetalipoproteinemia",
+        "subtopic": "Microsomal triglyceride-transfer protein deficiency and fat-soluble vitamin loss"
+      },
+      "learning_objective": "Link microsomal triglyceride-transfer protein deficiency to absent apoB-containing lipoproteins, fat malabsorption, acanthocytosis, and vitamin E–related neurologic dysfunction.",
+      "media_spec": "Original enterocyte chylomicron-assembly diagram paired with a peripheral smear showing acanthocytes and a vitamin-E pathway.",
+      "distinctness_note": "No prior draft covers apoB lipoprotein assembly or abetalipoproteinemia.",
+      "backend_evidence": {
+        "question_count": 3,
+        "explicit_media_required_count": 3,
+        "microscopy_or_pathology_count": 3,
+        "radiology_count": 0,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00004542"
+      }
+    },
+    {
+      "rank": 20,
+      "backend_title": "Gallstone disease",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Biliary disease",
+        "topic": "Acute calculous cholecystitis",
+        "subtopic": "Cystic-duct obstruction, gallbladder inflammation, and ultrasound findings"
+      },
+      "learning_objective": "Recognize acute calculous cholecystitis as persistent cystic-duct obstruction producing gallbladder-wall inflammation, sonographic Murphy sign, wall thickening, and pericholecystic fluid.",
+      "media_spec": "Original biliary-tree and right-upper-quadrant ultrasound schematic showing an impacted neck stone and inflammatory changes.",
+      "distinctness_note": "No prior draft targets gallstone obstruction or cholecystitis imaging.",
+      "backend_evidence": {
+        "question_count": 14,
+        "explicit_media_required_count": 2,
+        "microscopy_or_pathology_count": 2,
+        "radiology_count": 8,
+        "ecg_or_tracing_count": 0,
+        "graph_table_diagram_count": 0,
+        "example_student_qid": "NGQ-00005322"
+      }
+    }
+  ]
+}

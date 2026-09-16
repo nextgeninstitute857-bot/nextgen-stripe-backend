@@ -1,0 +1,25 @@
+{
+  "schema_version": "aylamed-private-installation-validation-v1",
+  "batch_id": "usmle-step1-2026-b011-in-chat-20",
+  "status": "private_research_validation_record",
+  "publication_allowed": false,
+  "installed_commit": "6086904c2da3d19527c8a928c53fd9130294728c",
+  "payload_sha256": "a7098e1eb5bb39675f2685f021d92251c7af23fcf24501fa84059bd5c81476c6",
+  "installed_files": {
+    "draft_json": 1,
+    "coverage_matrix": 1,
+    "originality_audit": 1,
+    "original_svg_media": 20
+  },
+  "temporary_transfer_files_removed": true,
+  "temporary_installer_workflow_removed": true,
+  "independent_ci_requested": true,
+  "safety": {
+    "live_qbank_write": false,
+    "student_exposure": false,
+    "merge": false,
+    "deployment": false,
+    "import": false,
+    "publication": false
+  }
+}

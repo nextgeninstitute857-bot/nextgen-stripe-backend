@@ -1,0 +1,309 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b015-in-chat-original-20-part-2",
+  "created_at": "2026-08-04T23:39:08+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "generation_method": "in_chat_original_generation_with_backend_coverage_signals_and_full_zip_lexical_screen",
+  "copyright_policy": {
+    "origin": "de_novo_from_current_public_medical_sources_and_private_coverage_signals",
+    "backend_export_used_for": "topic frequency and lexical similarity screening only",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_options_used": false,
+    "proprietary_qbank_explanations_used": false,
+    "proprietary_qbank_media_used": false,
+    "full_export_similarity_review_completed": true,
+    "human_semantic_review_required": true
+  },
+  "quality_controls": {
+    "distinct_learning_objectives": true,
+    "plausible_distractors_required": true,
+    "wrong_choice_explanations_required": true,
+    "authoritative_references_required": true,
+    "original_media_required": true,
+    "correct_answer_ids_server_side": true,
+    "publication_blocked": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-B015-GI-PBC-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Cholestatic and biliary disease",
+        "topic": "Primary biliary cholangitis",
+        "subtopic": "Antimitochondrial immunity to pyruvate dehydrogenase complex E2"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 49-year-old woman has progressive pruritus, fatigue, dry eyes, and xanthelasmas. Alkaline phosphatase is markedly elevated, bilirubin is mildly increased, and ultrasonography shows no extrahepatic obstruction. Antimitochondrial antibodies are present at high titer. Which autoantigen is most characteristically targeted?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Proteinase 3 in neutrophil azurophilic granules"
+        },
+        {
+          "id": 2,
+          "text_html": "The noncollagenous domain of the α3 chain of type IV collagen"
+        },
+        {
+          "id": 3,
+          "text_html": "Double-stranded nuclear DNA"
+        },
+        {
+          "id": 4,
+          "text_html": "Tissue transglutaminase bound to deamidated gliadin"
+        },
+        {
+          "id": 5,
+          "text_html": "The E2 component of the mitochondrial pyruvate dehydrogenase complex"
+        }
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>Primary biliary cholangitis is an autoimmune destruction of small intrahepatic bile ducts. Its highly specific antimitochondrial antibodies most often target the E2 component of the pyruvate dehydrogenase complex on the inner mitochondrial membrane. Histology can show nonsuppurative destructive cholangitis and florid duct lesions.</p>",
+      "wrong_choice_explanations": {
+        "1": "Proteinase 3 is the principal antigen of PR3-ANCA in granulomatosis with polyangiitis.",
+        "2": "Antibodies to α3 type IV collagen cause anti-GBM disease.",
+        "3": "Anti-double-stranded DNA antibodies are associated with systemic lupus erythematosus.",
+        "4": "Tissue transglutaminase is the major autoantigen in celiac disease."
+      },
+      "educational_objective": "Link the cholestatic phenotype of primary biliary cholangitis to antimitochondrial antibodies against pyruvate dehydrogenase complex E2.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/pbc-pdc-e2-florid-duct.svg",
+          "placement": "question",
+          "type": "original_vector_autoimmune_biliary",
+          "alt_text": "Link the cholestatic phenotype of primary biliary cholangitis to antimitochondrial antibodies against pyruvate dehydrogenase complex E2.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Primary Biliary Cholangitis. StatPearls. NCBI Bookshelf. Updated February 12, 2023. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK459209/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-GI-PDAC-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Pancreatic neoplasia",
+        "topic": "Pancreatic ductal adenocarcinoma",
+        "subtopic": "Activated stellate cells and desmoplastic stroma"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 69-year-old man has painless jaundice, weight loss, and a poorly defined mass in the pancreatic head. Biopsy shows irregular malignant glands dispersed through abundant collagen-rich stroma; the tumor has few patent blood vessels despite its large size. Which cell population is the principal source of this fibrotic matrix?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Activated pancreatic stellate cells with a myofibroblast phenotype"
+        },
+        {
+          "id": 2,
+          "text_html": "Resident Kupffer cells recruited from hepatic sinusoids"
+        },
+        {
+          "id": 3,
+          "text_html": "Insulin-secreting pancreatic β cells"
+        },
+        {
+          "id": 4,
+          "text_html": "Acinar cells undergoing physiologic enzyme secretion"
+        },
+        {
+          "id": 5,
+          "text_html": "Eosinophils activated by immunoglobulin E"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Pancreatic ductal adenocarcinoma characteristically induces a dense desmoplastic reaction. Activated pancreatic stellate cells and other cancer-associated fibroblasts acquire a myofibroblast phenotype and deposit collagen, fibronectin, and other extracellular-matrix components. The stiff, poorly perfused stroma can impede drug delivery and support tumor invasion.</p>",
+      "wrong_choice_explanations": {
+        "2": "Kupffer cells are resident hepatic macrophages and are not the main source of pancreatic desmoplasia.",
+        "3": "β cells produce insulin and do not form the collagen-rich tumor matrix.",
+        "4": "Acinar cells synthesize digestive enzymes; malignant ductal cells and activated stromal cells drive desmoplasia.",
+        "5": "Eosinophils can contribute to inflammation but are not the principal matrix-producing population in pancreatic ductal adenocarcinoma."
+      },
+      "educational_objective": "Explain the dense desmoplastic stroma of pancreatic ductal adenocarcinoma through activation of pancreatic stellate cells and cancer-associated fibroblasts.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/pancreatic-cancer-desmoplastic-stroma.svg",
+          "placement": "question",
+          "type": "original_vector_tumor_stroma",
+          "alt_text": "Explain the dense desmoplastic stroma of pancreatic ductal adenocarcinoma through activation of pancreatic stellate cells and cancer-associated fibroblasts.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "academic_reference",
+          "citation": "Pathology of pancreatic stroma in pancreatic ductal adenocarcinoma. NCBI Bookshelf. 2012. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK98933/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-ID-CHOLERA-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Enteric bacterial infection",
+        "topic": "Cholera",
+        "subtopic": "Gsα ADP-ribosylation, cAMP, and CFTR-mediated chloride secretion"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A relief worker develops abrupt, painless, profuse watery diarrhea after drinking untreated water in a coastal region. He is afebrile, stool microscopy shows no leukocytes, and he becomes severely volume depleted within hours. Which molecular event in small-intestinal epithelial cells causes the fluid loss?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "ADP-ribosylation of Giα that prevents inhibition of adenylate cyclase"
+        },
+        {
+          "id": 2,
+          "text_html": "ADP-ribosylation of Gsα that prevents GTP hydrolysis, causing persistent cAMP-dependent CFTR activation"
+        },
+        {
+          "id": 3,
+          "text_html": "Activation of membrane guanylate cyclase by a heat-stable peptide"
+        },
+        {
+          "id": 4,
+          "text_html": "Depurination of 28S ribosomal RNA with arrest of protein synthesis"
+        },
+        {
+          "id": 5,
+          "text_html": "Inhibition of the basolateral sodium-potassium ATPase"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Cholera toxin transfers ADP-ribose to Gsα and blocks its intrinsic GTPase activity. Gs remains active, adenylate cyclase continuously generates cAMP, protein kinase A activates CFTR, and chloride and bicarbonate secretion draw sodium and water into the intestinal lumen. The organism remains noninvasive, so stool inflammation is minimal.</p>",
+      "wrong_choice_explanations": {
+        "1": "Pertussis toxin ADP-ribosylates Giα and prevents inhibitory signaling; cholera toxin targets Gsα.",
+        "3": "Heat-stable enterotoxin from enterotoxigenic Escherichia coli activates guanylate cyclase and raises cGMP.",
+        "4": "Shiga toxin and ricin injure cells by targeting the 60S ribosomal subunit rather than producing a pure cAMP-mediated secretory diarrhea.",
+        "5": "Direct inhibition of sodium-potassium ATPase is not the mechanism of cholera toxin."
+      },
+      "educational_objective": "Trace cholera toxin from persistent Gs activation to increased cAMP, CFTR-mediated chloride secretion, and massive noninflammatory watery diarrhea.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/cholera-gs-camp-cftr.svg",
+          "placement": "question",
+          "type": "original_vector_bacterial_toxin_pathway",
+          "alt_text": "Trace cholera toxin from persistent Gs activation to increased cAMP, CFTR-mediated chloride secretion, and massive noninflammatory watery diarrhea.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "academic_reference",
+          "citation": "Cholera, Vibrio cholerae O1 and O139, and Other Pathogenic Vibrios. Medical Microbiology. NCBI Bookshelf. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK8407/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B015-ID-DIPHTHERIA-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Upper respiratory bacterial infection",
+        "topic": "Diphtheria",
+        "subtopic": "ADP-ribosylation of diphthamide on eukaryotic elongation factor 2"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>An incompletely immunized 8-year-old boy has fever, sore throat, cervical swelling, and an adherent gray pharyngeal membrane that bleeds when disturbed. Two days later he develops conduction abnormalities and reduced left ventricular function. The bacterial toxin causes these systemic effects by which action?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Cleaving 28S ribosomal RNA at the sarcin-ricin loop"
+        },
+        {
+          "id": 2,
+          "text_html": "Glucosylating a Rho-family GTPase and disrupting the actin cytoskeleton"
+        },
+        {
+          "id": 3,
+          "text_html": "ADP-ribosylating the diphthamide residue of eukaryotic elongation factor 2 and blocking translocation"
+        },
+        {
+          "id": 4,
+          "text_html": "Activating adenylate cyclase through persistent Gs signaling"
+        },
+        {
+          "id": 5,
+          "text_html": "Cleaving synaptobrevin in spinal inhibitory interneurons"
+        }
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>Diphtheria toxin is an A-B exotoxin. Its catalytic A fragment uses NAD to ADP-ribosylate diphthamide on eukaryotic elongation factor 2, halting ribosomal translocation and protein synthesis. Systemic toxin exposure can injure myocardium and peripheral nerves in addition to producing the local pseudomembrane.</p>",
+      "wrong_choice_explanations": {
+        "1": "Shiga toxin and ricin inactivate the 60S ribosomal subunit through 28S rRNA injury.",
+        "2": "Clostridioides difficile toxins glucosylate Rho-family GTPases.",
+        "4": "Cholera toxin persistently activates Gs and adenylate cyclase.",
+        "5": "Tetanospasmin cleaves synaptobrevin in inhibitory interneurons."
+      },
+      "educational_objective": "Identify diphtheria toxin as an NAD-dependent ADP-ribosyltransferase that inactivates eEF-2 and stops protein synthesis.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/diphtheria-ef2-adp-ribosylation.svg",
+          "placement": "question",
+          "type": "original_vector_translation_toxin",
+          "alt_text": "Identify diphtheria toxin as an NAD-dependent ADP-ribosyltransferase that inactivates eEF-2 and stops protein synthesis.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Diphtheria. StatPearls. NCBI Bookshelf. Updated July 5, 2026. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK560911/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "automated_lexical_pass_human_pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

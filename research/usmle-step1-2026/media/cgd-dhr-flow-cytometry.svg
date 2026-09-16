@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 930 520" role="img" aria-labelledby="title desc">
+<title id="title">Dihydrorhodamine oxidative burst assay</title><desc id="desc">Normal stimulated neutrophils shift to high fluorescence, while chronic granulomatous disease neutrophils remain at low fluorescence.</desc>
+<rect width="930" height="520" fill="#ffffff"/>
+<text x="40" y="45" font-family="Arial" font-size="28" font-weight="700">Dihydrorhodamine flow cytometry</text>
+<line x1="105" y1="430" x2="850" y2="430" stroke="#111827" stroke-width="4"/><line x1="105" y1="430" x2="105" y2="110" stroke="#111827" stroke-width="4"/>
+<text x="355" y="485" font-family="Arial" font-size="19">Fluorescence intensity → oxidant production</text>
+<text x="35" y="300" font-family="Arial" font-size="18" transform="rotate(-90 35 300)">Neutrophil count</text>
+<path d="M120 425 C150 420 165 240 205 160 C245 240 260 420 305 425" fill="none" stroke="#6b7280" stroke-width="7"/>
+<path d="M510 425 C540 418 565 245 620 155 C675 245 700 418 770 425" fill="none" stroke="#16a34a" stroke-width="8"/>
+<path d="M125 425 C160 418 180 255 220 180 C260 255 275 418 320 425" fill="none" stroke="#b91c1c" stroke-width="8" stroke-dasharray="14 10"/>
+<text x="545" y="120" font-family="Arial" font-size="19" font-weight="700">Normal stimulated</text>
+<text x="145" y="125" font-family="Arial" font-size="19" font-weight="700">Low fluorescence</text>
+<line x1="550" y1="350" x2="620" y2="350" stroke="#16a34a" stroke-width="8"/><text x="635" y="356" font-family="Arial" font-size="17">normal shift</text>
+<line x1="550" y1="385" x2="620" y2="385" stroke="#b91c1c" stroke-width="8" stroke-dasharray="14 10"/><text x="635" y="391" font-family="Arial" font-size="17">CGD: no shift</text>
+</svg>

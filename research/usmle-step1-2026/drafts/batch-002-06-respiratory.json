@@ -1,0 +1,90 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b002-06",
+  "created_at": "2026-08-04T02:23:00+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "copyright_policy": {
+    "origin": "de_novo_from_official_blueprint_and_public_medical_sources",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_media_used": false,
+    "similarity_review_required": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-RESP-SURF-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Neonatal pulmonary physiology",
+        "topic": "Neonatal respiratory distress syndrome",
+        "subtopic": "Surfactant deficiency, surface tension, and reduced compliance"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A newborn delivered at 28 weeks' gestation develops tachypnea, grunting, and intercostal retractions shortly after birth. Chest radiography shows diffuse reticulogranular opacities with air bronchograms. The accompanying pressure-volume curves compare this infant's lungs with surfactant-replete lungs. Which change best accounts for the infant's curve?</p>",
+      "options": [
+        {
+          "id": 4,
+          "text_html": "Reduced pulmonary capillary resistance causes right-to-left shunting through the lungs"
+        },
+        {
+          "id": 2,
+          "text_html": "Decreased alveolar surface tension causes premature closure of small airways"
+        },
+        {
+          "id": 1,
+          "text_html": "Increased alveolar surface tension causes a higher opening pressure and reduced lung compliance"
+        },
+        {
+          "id": 3,
+          "text_html": "Increased elastic recoil from excess elastin causes hyperinflation"
+        },
+        {
+          "id": 5,
+          "text_html": "Failure of chloride secretion into fetal airspaces causes persistent alveolar overdistension"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Premature type II pneumocytes produce insufficient surfactant. Higher surface tension promotes alveolar collapse, increases the pressure required to recruit alveoli, and lowers compliance. Repeated collapse and reopening increase work of breathing and contribute to diffuse atelectasis and hypoxemia.</p>",
+      "wrong_choice_explanations": {
+        "2": "Surfactant deficiency increases, rather than decreases, surface tension.",
+        "3": "The lungs are stiff and poorly expanded rather than hyperinflated from excess elastin.",
+        "4": "Pulmonary vascular resistance normally falls after birth; the primary defect in neonatal RDS is alveolar surfactant deficiency.",
+        "5": "Delayed fetal lung-fluid clearance causes transient tachypnea of the newborn, not the classic surfactant-deficient pressure-volume curve."
+      },
+      "educational_objective": "Surfactant deficiency in premature infants increases alveolar surface tension, raises opening pressure, decreases compliance, and promotes atelectasis.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/neonatal-rds-pressure-volume.svg",
+          "placement": "question",
+          "type": "original_vector_pressure_volume_curve",
+          "alt_text": "Pressure-volume curves showing lower volume at each pressure and a higher opening pressure in a surfactant-deficient lung than in a surfactant-replete lung.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_medical_reference",
+          "citation": "National Heart, Lung, and Blood Institute. Newborn Respiratory Distress Syndrome. Accessed August 4, 2026.",
+          "url": "https://www.nhlbi.nih.gov/health/respiratory-distress-syndrome"
+        },
+        {
+          "type": "peer_reviewed_review",
+          "citation": "Sweet DG et al. Prevention and treatment of respiratory distress syndrome in preterm neonates. Neonatology. 2018.",
+          "url": "https://pubmed.ncbi.nlm.nih.gov/29789058/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

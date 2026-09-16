@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500" role="img" aria-labelledby="title desc">
+  <title id="title">Iron studies</title>
+  <desc id="desc">Original table showing low ferritin, low serum iron, high total iron-binding capacity, and low transferrin saturation.</desc>
+  <rect width="960" height="500" fill="#ffffff"/>
+  <text x="480" y="48" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#173f4c">Iron studies</text>
+  <rect x="80" y="92" width="800" height="330" rx="16" fill="#f8fbfc" stroke="#2f6f7d" stroke-width="3"/>
+  <rect x="80" y="92" width="800" height="66" rx="16" fill="#dceff2"/>
+  <line x1="500" y1="92" x2="500" y2="422" stroke="#94b7be" stroke-width="2"/>
+  <g stroke="#b7cdd2" stroke-width="2">
+    <line x1="80" y1="158" x2="880" y2="158"/>
+    <line x1="80" y1="224" x2="880" y2="224"/>
+    <line x1="80" y1="290" x2="880" y2="290"/>
+    <line x1="80" y1="356" x2="880" y2="356"/>
+  </g>
+  <g font-family="Arial, sans-serif" fill="#173f4c">
+    <text x="290" y="134" text-anchor="middle" font-size="20" font-weight="700">Test</text>
+    <text x="690" y="134" text-anchor="middle" font-size="20" font-weight="700">Patient value</text>
+    <text x="110" y="199" font-size="19">Ferritin</text>
+    <text x="690" y="199" text-anchor="middle" font-size="21" font-weight="700" fill="#a33434">6 ng/mL ↓</text>
+    <text x="110" y="265" font-size="19">Serum iron</text>
+    <text x="690" y="265" text-anchor="middle" font-size="21" font-weight="700" fill="#a33434">20 µg/dL ↓</text>
+    <text x="110" y="331" font-size="19">Total iron-binding capacity</text>
+    <text x="690" y="331" text-anchor="middle" font-size="21" font-weight="700" fill="#8b5e00">480 µg/dL ↑</text>
+    <text x="110" y="397" font-size="19">Transferrin saturation</text>
+    <text x="690" y="397" text-anchor="middle" font-size="21" font-weight="700" fill="#a33434">4% ↓</text>
+  </g>
+  <text x="480" y="465" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" fill="#496c74">Pattern: depleted iron stores with increased transferrin capacity</text>
+</svg>
