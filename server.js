@@ -728,7 +728,7 @@ const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
-const ROADMAP_RETROSPECTIVE_REVISION_BUILD = "v262-recorded-revision-attendance-preserve";
+const ROADMAP_RETROSPECTIVE_REVISION_BUILD = "v263-past-date-holiday-safety";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
 const RECORDING_LABEL_CORRECTIONS_BUILD = LMS_RECORDING_LABEL_CORRECTIONS_BUILD;
@@ -71178,7 +71178,8 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     if (!sourceRef.roadmap || !sourceRef.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
 
     const selectedDate = ngKnownScheduleDate(sourceRef.day.date || sourceRef.day.scheduled_date);
-    if (!selectedDate || selectedDate > todayKey()) {
+    const holidayTimezone = ngRoadmapTimezone(sourceRef.roadmap, sourceRef.day);
+    if (!selectedDate || selectedDate > ngDailySessionDateKey(new Date(), holidayTimezone)) {
       return res.status(400).json({ success: false, error: "Retrospective Holiday is only for today or a past roadmap date" });
     }
     if (ngRoadmapDayIsNoClass(sourceRef.day)) {
@@ -71187,10 +71188,11 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
 
     const selectedSessionId = String(sourceRef.day.live_session_id || sourceRef.day.session_id || "").trim();
     const selectedSession = selectedSessionId ? sourceDb.liveSessions?.[selectedSessionId] : null;
-    const selectedHasRecording = Boolean(selectedSession && ngKnownScheduleSessionHasRecording(sourceDb, selectedSession));
     const archiveSelectedRevision = req.body.archive_selected_revision === true;
     const selectedRecordingEntries = Object.entries(sourceDb.recordings || {}).filter(([storageKey, recording]) => {
-      if (!recording || !selectedSessionId) return false;
+      if (!recording) return false;
+      if (String(recording.roadmap_day_id || "") === String(sourceRef.day.id)) return true;
+      if (!selectedSessionId) return false;
       if (String(recording.session_id || "").trim() === selectedSessionId) return true;
       const sessionRecordingKeys = [selectedSession?.recording_key, selectedSession?.recording_id]
         .map((value) => String(value || "").trim())
@@ -71201,18 +71203,26 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
       .map(([storageKey, recording]) => String(recording.recording_key || recording.id || storageKey || "").trim())
       .filter(Boolean)
       .sort();
+    const selectedHasRecording = selectedRecordingEntries.length > 0 || Boolean(selectedSession && ngKnownScheduleSessionHasRecording(sourceDb, selectedSession));
     const selectedAttendanceEntries = Object.entries(sourceDb.attendance || {}).filter(([, attendance]) => {
-      return String(attendance?.session_id || attendance?.live_session_id || "").trim() === selectedSessionId;
+      return Boolean(selectedSessionId) && String(attendance?.session_id || attendance?.live_session_id || "").trim() === selectedSessionId;
     });
     const selectedAttendanceKeys = selectedAttendanceEntries.map(([key]) => String(key)).sort();
     const selectedAttendanceCount = selectedAttendanceEntries.length;
     const selectedNoteRows = Object.entries(sourceDb.notes || {}).filter(([noteKey, note]) => {
-      return String(note?.session_id || noteKey || "").trim() === selectedSessionId;
+      return String(note?.roadmap_day_id || "") === String(sourceRef.day.id) || (Boolean(selectedSessionId) && String(note?.session_id || noteKey || "").trim() === selectedSessionId);
     });
     const selectedHasSubstantiveNotes = selectedNoteRows.some(([, note]) => {
-      const content = String(note?.notes || note?.cleaned_notes || note?.student_notes || note?.transcript_text || "").trim();
-      return content.length >= 300 || note?.published === true || note?.is_published === true;
+      const substantive = [note?.notes, note?.cleaned_notes, note?.student_notes, note?.transcript_text]
+        .some(content => String(content || "").trim().length >= 300);
+      return substantive || note?.published === true || note?.is_published === true;
     });
+
+    // A missing video does not prove that no teaching occurred. Never silently
+    // turn published notes or attended classes into a holiday from the date picker.
+    if (!selectedHasRecording && (selectedHasSubstantiveNotes || selectedAttendanceCount > 0)) {
+      return res.status(409).json({ success: false, error: "Safety stop: this date has published/substantive notes or attendance. Review the session before marking it as a holiday; nothing was changed." });
+    }
 
     if (selectedHasRecording && !archiveSelectedRevision) {
       return res.status(409).json({
@@ -71223,7 +71233,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
         message: "Preview again with archive_selected_revision=true only when this was a non-teaching revision recording. The source recording will be preserved and hidden, not deleted.",
       });
     }
-    if (selectedHasRecording && archiveSelectedRevision && !selectedRecordingKeys.length) {
+    if (selectedHasRecording && archiveSelectedRevision && (!selectedRecordingKeys.length || !selectedSession)) {
       return res.status(409).json({ success: false, error: "The selected session has a recording reference but no exact stored recording row was found; nothing was changed", session_id: selectedSessionId });
     }
     if (selectedHasRecording && archiveSelectedRevision && selectedHasSubstantiveNotes) {
@@ -71255,7 +71265,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
       "video_library_lecture_id", "video_lecture", "library_lecture", "recorded_lecture",
       "task", "daily_task", "task_items", "community_prompt", "assessment_task", "assessment_day",
       "flashcard_tags", "resource_links", "video_url", "video_lecture_url", "library_video_url",
-      "system_day", "day_in_system", "day_number", "instructional_day_number",
+      "system_day", "day_in_system", "day_number", "instructional_day_number", "source_master_map_index",
     ];
     const packetOf = (day) => Object.fromEntries(packetFields.filter((key) => day[key] !== undefined).map((key) => [key, clone(day[key])]));
     const protectedIdentityAndUrls = (item = {}) => Object.fromEntries(Object.entries(item).filter(([key]) => (
@@ -71288,9 +71298,12 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
           })),
         }
       : null;
-    const snapshotInput = JSON.stringify({ courseId, selected: String(sourceRef.day.id), updated: sourceRef.roadmap.updated_at || "", anchors, selectedRevisionSnapshot, selectedAttendanceKeys });
+    const snapshotInput = JSON.stringify({ courseId, selected: String(sourceRef.day.id), roadmap: sourceRef.roadmap, anchors, selectedRevisionSnapshot, selectedAttendanceEntries, selectedNoteRows,
+      protectedSessions: anchors.map(row => sourceDb.liveSessions?.[row.session_id] || null),
+      protectedRecordings: Object.entries(sourceDb.recordings || {}).filter(([, row]) => String(row?.course_id || "") === courseId),
+    });
     const previewToken = crypto.createHash("sha256").update(snapshotInput).digest("hex");
-    const lastDate = anchors.at(-1)?.date;
+    const lastDate = sourceRef.roadmap.days.map(day => ngKnownScheduleDate(day.date || day.scheduled_date)).filter(Boolean).sort().at(-1);
     const nextDate = (() => {
       const cursor = new Date(`${lastDate}T00:00:00Z`);
       do cursor.setUTCDate(cursor.getUTCDate() + 1); while (sourceRef.roadmap.skip_sundays !== false && cursor.getUTCDay() === 0);
@@ -71412,6 +71425,15 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
       }
     }
 
+    if (selectedSessionId && workingDb.liveSessions?.[selectedSessionId] && !selectedRevisionSnapshot) {
+      // Time-derived or manually completed status must not keep a phantom class
+      // visible after an explicitly confirmed, evidence-free past holiday.
+      Object.assign(workingDb.liveSessions[selectedSessionId], {
+        status: "cancelled", archived_from_active: true, no_class_placeholder: true,
+        student_visible: false, cancelled_reason: "retrospective_holiday",
+        updated_by: user.id, updated_at: new Date().toISOString(),
+      });
+    }
     const holidayDay = ngClearNoClassRoadmapFields(ref.day);
     Object.assign(holidayDay, {
       title: "Holiday / No Live Class", description: String(req.body.reason || `No live class was held on ${selectedDate}. The academic sequence was moved forward safely.`),
@@ -71425,14 +71447,18 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
       Object.assign(workingTail[index], clone(packets[index - 1]), { updated_by: user.id, updated_at: new Date().toISOString() });
     }
     const lastSource = workingTail.at(-1);
+    const newDayBase = clone(lastSource);
+    for (const key of packetFields) delete newDayBase[key];
     const newDay = {
-      ...clone(lastSource), ...clone(packets.at(-1)), id: `${courseId}:day:retrospective:${uuid()}`,
+      ...newDayBase, ...clone(packets.at(-1)), id: `${courseId}:day:retrospective:${uuid()}`,
       date: nextDate, scheduled_date: nextDate, live_session_id: null, session_id: null,
       status: "scheduled", roadmap_status: "scheduled", is_schedule_placeholder: false,
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(), updated_by: user.id,
     };
     delete newDay.original_day_snapshot;
     roadmap.days.push(newDay);
+    roadmap.schedule_slots = roadmap.days.length;
+    roadmap.instructional_days = roadmap.days.filter(day => !ngRoadmapDayIsNoClass(day)).length;
     ngSyncRoadmapSequenceMetadata(workingDb, roadmap, { actorId: user.id });
     ngSyncLinkedLiveSessionsForRoadmap(workingDb, roadmap, { actorId: user.id });
 
