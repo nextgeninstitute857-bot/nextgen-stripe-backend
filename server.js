@@ -71164,6 +71164,73 @@ app.post("/admin/roadmap/:dayId/advance-schedule", async (req, res) => {
   }
 });
 
+function ngRetrospectiveHolidayHasMediaEvidence(recording = {}) {
+  const directMediaFields = [
+    "recording_url",
+    "share_url",
+    "download_url",
+    "play_url",
+    "transcript_url",
+    "transcript_download_url",
+  ];
+  if (directMediaFields.some((field) => String(recording[field] || "").trim())) return true;
+
+  // Meeting creation writes a minimal recordings row containing meeting_id,
+  // session_id and published:false before Zoom has produced any media. Those
+  // identity fields alone are not evidence of a recording or transcript.
+  if (
+    recording.published === true ||
+    recording.is_published === true ||
+    recording.recording_published === true ||
+    recording.transcript_imported === true ||
+    String(recording.selected_video_file_id || recording.recording_file_id || recording.video_file_id || "").trim()
+  ) return true;
+
+  const files = [
+    ...(Array.isArray(recording.recording_files) ? recording.recording_files : []),
+    ...(Array.isArray(recording.files) ? recording.files : []),
+  ];
+  return files.some((file) => {
+    if (!file || typeof file !== "object") return false;
+    if (directMediaFields.some((field) => String(file[field] || "").trim())) return true;
+    const fileId = String(file.id || file.file_id || "").trim();
+    const fileType = String(file.file_type || file.recording_type || "").trim();
+    return Boolean(fileId && fileType);
+  });
+}
+
+function ngRetrospectiveHolidaySessionHasMediaEvidence(session = {}) {
+  return [
+    "recording_url",
+    "share_url",
+    "download_url",
+    "transcript_url",
+    "transcript_download_url",
+  ].some((field) => String(session[field] || "").trim()) ||
+    session.recording_published === true ||
+    session.transcript_imported === true;
+}
+
+function ngRetrospectiveHolidayRecordingEntriesForDay(db = {}, day = {}, session = {}) {
+  const dayId = String(day.id || "").trim();
+  const sessionId = String(session.id || day.live_session_id || day.session_id || "").trim();
+  const sessionRecordingKeys = new Set(
+    [session.recording_key, session.recording_id, session.zoom_meeting_id]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  );
+
+  return Object.entries(db.recordings || {}).filter(([storageKey, recording]) => {
+    if (!recording) return false;
+    if (dayId && String(recording.roadmap_day_id || "").trim() === dayId) return true;
+    if (sessionId && String(recording.session_id || "").trim() === sessionId) return true;
+    const recordingKeys = [recording.recording_key, recording.id, recording.meeting_id, storageKey]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    return recordingKeys.some((key) => sessionRecordingKeys.has(key));
+  });
+}
+
 // Recording-safe retrospective holiday. Unlike push-status, this keeps every
 // existing roadmap day/session/date as the classroom anchor and moves only the
 // academic packet to the next active anchor. The final packet is appended as a
@@ -71189,21 +71256,25 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     const selectedSessionId = String(sourceRef.day.live_session_id || sourceRef.day.session_id || "").trim();
     const selectedSession = selectedSessionId ? sourceDb.liveSessions?.[selectedSessionId] : null;
     const archiveSelectedRevision = req.body.archive_selected_revision === true;
-    const selectedRecordingEntries = Object.entries(sourceDb.recordings || {}).filter(([storageKey, recording]) => {
-      if (!recording) return false;
-      if (String(recording.roadmap_day_id || "") === String(sourceRef.day.id)) return true;
-      if (!selectedSessionId) return false;
-      if (String(recording.session_id || "").trim() === selectedSessionId) return true;
-      const sessionRecordingKeys = [selectedSession?.recording_key, selectedSession?.recording_id]
-        .map((value) => String(value || "").trim())
-        .filter(Boolean);
-      return sessionRecordingKeys.includes(String(recording.recording_key || recording.id || storageKey || "").trim());
-    });
+    const selectedRecordingCandidates = ngRetrospectiveHolidayRecordingEntriesForDay(
+      sourceDb,
+      sourceRef.day,
+      selectedSession || {}
+    );
+    const selectedRecordingEntries = selectedRecordingCandidates.filter(([, recording]) =>
+      ngRetrospectiveHolidayHasMediaEvidence(recording)
+    );
     const selectedRecordingKeys = selectedRecordingEntries
       .map(([storageKey, recording]) => String(recording.recording_key || recording.id || storageKey || "").trim())
       .filter(Boolean)
       .sort();
-    const selectedHasRecording = selectedRecordingEntries.length > 0 || Boolean(selectedSession && ngKnownScheduleSessionHasRecording(sourceDb, selectedSession));
+    const selectedHasRecording = selectedRecordingEntries.length > 0 || Boolean(
+      selectedSession && ngRetrospectiveHolidaySessionHasMediaEvidence(selectedSession)
+    );
+    const mediaLessRecordingReferencesPreserved = Math.max(
+      0,
+      selectedRecordingCandidates.length - selectedRecordingEntries.length
+    );
     const selectedAttendanceEntries = Object.entries(sourceDb.attendance || {}).filter(([, attendance]) => {
       return Boolean(selectedSessionId) && String(attendance?.session_id || attendance?.live_session_id || "").trim() === selectedSessionId;
     });
@@ -71212,7 +71283,12 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     const selectedNoteRows = Object.entries(sourceDb.notes || {}).filter(([noteKey, note]) => {
       return String(note?.roadmap_day_id || "") === String(sourceRef.day.id) || (Boolean(selectedSessionId) && String(note?.session_id || noteKey || "").trim() === selectedSessionId);
     });
-    const selectedHasSubstantiveNotes = selectedNoteRows.some(([, note]) => {
+    const selectedHasTranscript = selectedNoteRows.some(([, note]) =>
+      note?.transcript_imported === true ||
+      [note?.transcript_text, note?.transcript, note?.transcript_url, note?.transcript_download_url]
+        .some((content) => String(content || "").trim().length > 0)
+    );
+    const selectedHasSubstantiveNotes = selectedHasTranscript || selectedNoteRows.some(([, note]) => {
       const substantive = [note?.notes, note?.cleaned_notes, note?.student_notes, note?.transcript_text]
         .some(content => String(content || "").trim().length >= 300);
       return substantive || note?.published === true || note?.is_published === true;
@@ -71276,9 +71352,13 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     const anchors = activeTail.map((day) => {
       const sessionId = String(day.live_session_id || day.session_id || "").trim();
       const session = sessionId ? sourceDb.liveSessions?.[sessionId] : null;
+      const mediaBackedRecordings = ngRetrospectiveHolidayRecordingEntriesForDay(sourceDb, day, session || {})
+        .some(([, recording]) => ngRetrospectiveHolidayHasMediaEvidence(recording));
       return {
         day_id: String(day.id || ""), date: ngKnownScheduleDate(day.date || day.scheduled_date), session_id: sessionId,
-        recording_anchor: Boolean(session && ngKnownScheduleSessionHasRecording(sourceDb, session)),
+        recording_anchor: Boolean(session && (
+          ngRetrospectiveHolidaySessionHasMediaEvidence(session) || mediaBackedRecordings
+        )),
       };
     });
     const selectedRevisionSnapshot = selectedHasRecording && archiveSelectedRevision
@@ -71327,6 +71407,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
       success: true, dry_run: true, applied: false, build: ROADMAP_RETROSPECTIVE_REVISION_BUILD, course_id: courseId, selected_date: selectedDate,
       preview_token: previewToken, confirmation_required: confirmationRequired,
       affected_existing_days: activeTail.length, recording_anchors_preserved: anchors.filter((row) => row.recording_anchor).length,
+      media_less_recording_references_preserved: mediaLessRecordingReferencesPreserved,
       selected_revision: selectedRevisionSnapshot ? {
         session_id: selectedSessionId,
         recording_keys: selectedRecordingKeys,
@@ -71345,7 +71426,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
       new_final_date: nextDate, changes,
       message: selectedRevisionSnapshot
         ? "Preview only. No data changed. The non-teaching revision will be hidden without deletion; later academic packets will move forward while dates, recording URLs and existing session IDs remain fixed."
-        : "Preview only. No data changed. Recordings, transcripts, notes, session IDs, URLs and actual class dates remain fixed.",
+        : `Preview only. No data changed. Recordings, transcripts, notes, session IDs, URLs and actual class dates remain fixed.${mediaLessRecordingReferencesPreserved ? ` ${mediaLessRecordingReferencesPreserved} media-less Zoom meeting placeholder(s) were preserved and did not count as recordings.` : ""}`,
     });
     if (String(req.body.confirm || "").trim().toUpperCase() !== confirmationRequired) {
       return res.status(400).json({ success: false, error: `Exact confirmation is required: ${confirmationRequired}` });
@@ -71487,10 +71568,11 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     return res.json({
       success: true, dry_run: false, applied: true, build: ROADMAP_RETROSPECTIVE_REVISION_BUILD, course_id: courseId, selected_date: selectedDate,
       affected_existing_days: workingTail.length, recording_anchors_preserved: anchors.filter((row) => row.recording_anchor).length,
+      media_less_recording_references_preserved: mediaLessRecordingReferencesPreserved,
       revision_recordings_hidden: selectedRevisionSnapshot ? selectedRecordingKeys.length : 0,
       revision_session_archived: selectedRevisionSnapshot ? selectedSessionId : null,
       recordings_deleted: 0, notes_deleted: 0, sessions_deleted: 0, attendance_deleted: 0, students_deleted: 0, new_final_date: nextDate,
-      message: "Retrospective holiday applied. Academic packets moved forward while recordings, transcripts, notes, existing session IDs, URLs and actual class dates remained fixed.",
+      message: `Retrospective holiday applied. Academic packets moved forward while recordings, transcripts, notes, existing session IDs, URLs and actual class dates remained fixed.${mediaLessRecordingReferencesPreserved ? ` ${mediaLessRecordingReferencesPreserved} media-less Zoom meeting placeholder(s) were preserved and did not count as recordings.` : ""}`,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to apply recording-safe retrospective holiday" });
