@@ -728,7 +728,7 @@ import path from "path";
 import { PassThrough } from "node:stream";
 import { pipeline as pipelineStreams } from "node:stream/promises";
 import { createGzip } from "node:zlib";
-import { eventLoopDelayStats, jsonWriteStats, writeJsonAtomicStreaming } from "./lib/json-atomic-writer.js";
+import { eventLoopDelayStats, jsonWriteSources, jsonWriteStats, rememberWriteSource, writeJsonAtomicStreaming } from "./lib/json-atomic-writer.js";
 import { getHeapStatistics } from "node:v8";
 
 dotenv.config();
@@ -2461,6 +2461,7 @@ function ngApplyTeachingAccessReconciliation(db = {}, {
 }
 
 async function writeLiveDb(db, { teachingAccessSource = "lms_database_write" } = {}) {
+  rememberWriteSource("LMS database");
   const task = writeQueue
     .catch((error) => {
       console.error("Previous LMS write failed; queue recovered:", error.message);
@@ -11928,7 +11929,7 @@ app.get("/health", async (req, res) => {
     success: true,
     message: "Backend running",
     build: NEXTGEN_BACKEND_BUILD,
-    performance: { event_loop_delay: eventLoopDelayStats(), db_writes: jsonWriteStats() },
+    performance: { event_loop_delay: eventLoopDelayStats(), db_writes: jsonWriteStats(), db_write_sources: jsonWriteSources() },
     crm_ayla_reply_build: CRM_AYLA_REPLY_BUILD,
     crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD,
     crm_multiexam_lead_capture_build: CRM_MULTIEXAM_LEAD_CAPTURE_BUILD,
@@ -22234,6 +22235,7 @@ async function ngApplyCrmRetentionGuard(db = {}) {
 
 
 async function writeCrmDb(db) {
+  rememberWriteSource("CRM database");
   const task = crmWriteQueue
     .catch((error) => {
       console.error("Previous CRM write failed; queue recovered:", error.message);
