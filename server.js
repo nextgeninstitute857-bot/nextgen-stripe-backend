@@ -71861,6 +71861,126 @@ function ngRetrospectiveHolidayRecordingEntriesForDay(db = {}, day = {}, session
 // existing roadmap day/session/date as the classroom anchor and moves only the
 // academic packet to the next active anchor. The final packet is appended as a
 // new future day. Preview and apply are locked to the same roadmap snapshot.
+// Removes a past teaching day whose class recording was lost (empty Zoom file)
+// and renumbers the later days of that system. Unlike retrospective-holiday,
+// no later academic packet moves and every date stays fixed. The day, its
+// session, recordings and notes are kept but hidden, never deleted.
+app.post("/admin/roadmap/:dayId/remove-unrecorded-day", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || "").trim();
+    const ref = ngFindAdminRoadmapDayRef(db, { courseId, dayId: req.params.dayId });
+    if (!ref.roadmap || !ref.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
+    const day = ref.day;
+    const date = ngKnownScheduleDate(day.date || day.scheduled_date);
+    if (!date || date >= todayKey()) return res.status(400).json({ success: false, error: "Only a past roadmap day can be removed this way" });
+    if (ngRoadmapDayIsNoClass(day)) return res.status(409).json({ success: false, error: "This roadmap day is already a no-class day" });
+
+    const sessionId = String(day.live_session_id || day.session_id || "").trim();
+    const transfers = db.recordingVimeoTransfers || {};
+    const dayRecordings = Object.entries(db.recordings || {}).filter(([, recording]) =>
+      recording && (String(recording.roadmap_day_id || "") === String(day.id) || (sessionId && String(recording.session_id || "") === sessionId)));
+    const playable = dayRecordings.filter(([key, recording]) => {
+      const transfer = transfers[key] || {};
+      const emptyCopy = transfer.vimeo_status === "available" && Number(transfer.vimeo_duration_seconds || 0) > 0 && Number(transfer.vimeo_duration_seconds) < 60;
+      const hasLink = Boolean(recording.vimeo_player_url || recording.recording_url || recording.share_url);
+      return hasLink && !emptyCopy;
+    });
+    if (playable.length) {
+      return res.status(409).json({ success: false, error: "Safety stop: this day has a playable recording", recording_keys: playable.map(([key]) => key) });
+    }
+
+    const allDates = new Map(ref.roadmap.days.map((item) => [String(item.id || ""), ngKnownScheduleDate(item.date || item.scheduled_date)]));
+    const stage = (targetDb) => {
+      const target = ngFindAdminRoadmapDayRef(targetDb, { courseId: ref.courseId, dayId: day.id });
+      Object.assign(target.day, {
+        status: "cancelled",
+        roadmap_status: "cancelled",
+        removed_unrecorded_teaching_day: true,
+        removed_reason: String(req.body.reason || "Class recording was lost; day removed and later days renumbered").slice(0, 300),
+        removed_at: new Date().toISOString(),
+        removed_by: user.id,
+      });
+      ngRecalculateRoadmapSchedule(targetDb, target.roadmap, {
+        startDate: target.roadmap.start_date || target.roadmap.settings?.start_date || target.roadmap.days[0]?.date,
+        skipSundays: target.roadmap.skip_sundays !== false && target.roadmap.settings?.skip_sundays !== false,
+        actorId: user.id,
+        preserveDatesByDayId: allDates,
+      });
+      return target.roadmap;
+    };
+    const previewRoadmap = stage(JSON.parse(JSON.stringify(db)));
+    const beforeById = new Map(ref.roadmap.days.map((item) => [String(item.id || ""), item]));
+    const changedDays = previewRoadmap.days.map((item) => {
+      const before = beforeById.get(String(item.id || "")) || {};
+      const dateBefore = ngKnownScheduleDate(before.date || before.scheduled_date);
+      const dateAfter = ngKnownScheduleDate(item.date || item.scheduled_date);
+      if (dateBefore !== dateAfter) return { id: item.id, date_moved: true, from_date: dateBefore, to_date: dateAfter };
+      const same = Number(before.system_day || 0) === Number(item.system_day || 0) &&
+        String(before.title || "") === String(item.title || "") && String(before.status || "") === String(item.status || "");
+      if (same) return null;
+      return { id: item.id, date: dateAfter, from: before.title || null, to: item.title || null, from_system_day: before.system_day ?? null, to_system_day: item.system_day ?? null };
+    }).filter(Boolean);
+    const datesMoved = changedDays.filter((row) => row.date_moved);
+    if (datesMoved.length) return res.status(409).json({ success: false, error: "Safety stop: removing this day would move dates", dates_moved: datesMoved });
+    const attendanceCount = Object.values(db.attendance || {}).filter((row) => sessionId && String(row?.session_id || "") === sessionId).length;
+    const noteKeys = Object.entries(db.notes || {})
+      .filter(([key, note]) => (sessionId && (key === sessionId || String(note?.session_id || "") === sessionId)) || String(note?.roadmap_day_id || "") === String(day.id))
+      .map(([key]) => key);
+    const summary = {
+      course_id: ref.courseId,
+      removed_day: { id: day.id, date, title: day.title || null, session_id: sessionId || null },
+      hidden_recordings: dayRecordings.map(([key]) => key),
+      hidden_notes: noteKeys,
+      attendance_rows_kept: attendanceCount,
+      changed_days: changedDays,
+      roadmap_updated_at: ref.roadmap.updated_at || null,
+    };
+    if (req.body.dry_run !== false) return res.json({ success: true, dry_run: true, confirmation_required: "REMOVE_UNRECORDED_TEACHING_DAY", ...summary });
+
+    if (String(req.body.confirm || "") !== "REMOVE_UNRECORDED_TEACHING_DAY") {
+      return res.status(400).json({ success: false, error: "Exact confirmation is required: REMOVE_UNRECORDED_TEACHING_DAY" });
+    }
+    if (String(req.body.expected_roadmap_updated_at || "") !== String(ref.roadmap.updated_at || "")) {
+      return res.status(409).json({ success: false, error: "Roadmap changed after preview. Preview again before applying." });
+    }
+    await ensureDataDir();
+    const backupDir = path.join(DATA_DIR, "backups");
+    await fs.mkdir(backupDir, { recursive: true });
+    const backupPath = path.join(backupDir, `live-session-db-before-remove-unrecorded-day-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+    await fs.writeFile(backupPath, JSON.stringify(db), "utf8");
+
+    const workingDb = JSON.parse(JSON.stringify(db));
+    const now = new Date().toISOString();
+    const workingRoadmap = stage(workingDb);
+    for (const [key] of dayRecordings) {
+      workingDb.recordings[key] = { ...workingDb.recordings[key], published: false, hidden_from_recordings: true, hidden_reason: "roadmap_day_removed_recording_lost", updated_at: now };
+    }
+    for (const key of noteKeys) {
+      workingDb.notes[key] = { ...workingDb.notes[key], published: false, is_published: false, hidden_reason: "roadmap_day_removed_recording_lost", updated_at: now };
+    }
+    if (sessionId && workingDb.liveSessions?.[sessionId]) {
+      workingDb.liveSessions[sessionId] = { ...workingDb.liveSessions[sessionId], archived_from_active: true, removed_from_roadmap: true, recording_published: false, updated_at: now, updated_by: user.id };
+    }
+    // Locked label corrections pin the public day number of a recording; keep them in step with the renumbering.
+    const activeBySession = new Map(workingRoadmap.days.filter((item) => !ngRoadmapDayIsNoClass(item))
+      .map((item) => [String(item.live_session_id || item.session_id || ""), item]));
+    for (const [key, recording] of Object.entries(workingDb.recordings || {})) {
+      if (recording?.label_correction_locked !== true) continue;
+      const target = activeBySession.get(String(recording.session_id || ""));
+      if (!target || Number(recording.corrected_system_day || 0) === Number(target.system_day || 0)) continue;
+      workingDb.recordings[key] = { ...recording, corrected_system_day: target.system_day, corrected_topic: target.title || recording.corrected_topic, updated_at: now };
+    }
+    workingRoadmap.updated_by = user.id;
+    workingRoadmap.updated_at = now;
+    await writeLiveDb(workingDb);
+    res.json({ success: true, dry_run: false, applied: true, backup_path: backupPath, ...summary, roadmap_updated_at: workingRoadmap.updated_at });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
   try {
     const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
