@@ -728,6 +728,7 @@ import path from "path";
 import { PassThrough } from "node:stream";
 import { pipeline as pipelineStreams } from "node:stream/promises";
 import { createGzip } from "node:zlib";
+import { eventLoopDelayStats, jsonWriteStats, writeJsonAtomicStreaming } from "./lib/json-atomic-writer.js";
 import { getHeapStatistics } from "node:v8";
 
 dotenv.config();
@@ -2193,170 +2194,9 @@ async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 }
 
-// v190h: bounded-memory JSON persistence.
-// The old writers called JSON.stringify() on an entire database, temporarily
-// creating another full database-sized string in memory. This writer walks the
-// value and flushes small chunks to an atomic temporary file instead.
-const NEXTGEN_JSON_WRITE_BUFFER_BYTES = Math.max(
-  64 * 1024,
-  Math.min(4 * 1024 * 1024, Number(process.env.NEXTGEN_JSON_WRITE_BUFFER_BYTES || 512 * 1024) || 512 * 1024)
-);
-
-async function ngWriteJsonAtomicStreaming(filePath, value, label = "database", { gzip = false } = {}) {
-  const tempPath = `${filePath}.tmp`;
-  let handle = null;
-  let streamInput = null;
-  let streamPipeline = null;
-  let pending = "";
-  let pendingBytes = 0;
-  const activeObjects = new WeakSet();
-
-  const flush = async () => {
-    if (!pending) return;
-    const chunk = pending;
-    pending = "";
-    pendingBytes = 0;
-    if (streamInput) {
-      if (!streamInput.write(chunk, "utf8")) await new Promise((resolve) => streamInput.once("drain", resolve));
-    } else {
-      await handle.write(chunk, null, "utf8");
-    }
-  };
-
-  const writePiece = async (piece) => {
-    const text = String(piece ?? "");
-    if (!text) return;
-    const textBytes = Buffer.byteLength(text, "utf8");
-    if (textBytes >= NEXTGEN_JSON_WRITE_BUFFER_BYTES) {
-      await flush();
-      if (streamInput) {
-        if (!streamInput.write(text, "utf8")) await new Promise((resolve) => streamInput.once("drain", resolve));
-      } else {
-        await handle.write(text, null, "utf8");
-      }
-      return;
-    }
-    pending += text;
-    pendingBytes += textBytes;
-    if (pendingBytes >= NEXTGEN_JSON_WRITE_BUFFER_BYTES) {
-      await flush();
-    }
-  };
-
-  const writeJsonString = async (input) => {
-    const text = String(input);
-    await writePiece('"');
-    const charsPerChunk = 64 * 1024;
-    for (let start = 0; start < text.length;) {
-      let end = Math.min(text.length, start + charsPerChunk);
-      if (end < text.length) {
-        const finalCode = text.charCodeAt(end - 1);
-        if (finalCode >= 0xd800 && finalCode <= 0xdbff) end -= 1;
-      }
-      const escaped = JSON.stringify(text.slice(start, end)).slice(1, -1);
-      await writePiece(escaped);
-      start = end;
-    }
-    await writePiece('"');
-  };
-
-  const writeValue = async (item, inArray = false) => {
-    if (item === null) {
-      await writePiece("null");
-      return;
-    }
-
-    const type = typeof item;
-    if (type === "string") {
-      await writeJsonString(item);
-      return;
-    }
-    if (type === "number") {
-      await writePiece(Number.isFinite(item) ? String(item) : "null");
-      return;
-    }
-    if (type === "boolean") {
-      await writePiece(item ? "true" : "false");
-      return;
-    }
-    if (type === "bigint") {
-      throw new TypeError("Cannot serialize BigInt to JSON");
-    }
-    if (type === "undefined" || type === "function" || type === "symbol") {
-      await writePiece(inArray ? "null" : "null");
-      return;
-    }
-
-    if (typeof item?.toJSON === "function") {
-      await writeValue(item.toJSON(), inArray);
-      return;
-    }
-    if (activeObjects.has(item)) {
-      throw new TypeError(`Cannot serialize circular structure in ${label}`);
-    }
-    activeObjects.add(item);
-
-    try {
-      if (Array.isArray(item)) {
-        await writePiece("[");
-        for (let index = 0; index < item.length; index += 1) {
-          if (index) await writePiece(",");
-          await writeValue(item[index], true);
-        }
-        await writePiece("]");
-        return;
-      }
-
-      await writePiece("{");
-      let written = 0;
-      for (const [key, child] of Object.entries(item)) {
-        const childType = typeof child;
-        if (childType === "undefined" || childType === "function" || childType === "symbol") continue;
-        if (written) await writePiece(",");
-        await writeJsonString(key);
-        await writePiece(":");
-        await writeValue(child, false);
-        written += 1;
-      }
-      await writePiece("}");
-    } finally {
-      activeObjects.delete(item);
-    }
-  };
-
-  try {
-    await ensureDataDir();
-    if (gzip) {
-      streamInput = new PassThrough();
-      streamPipeline = pipelineStreams(
-        streamInput,
-        createGzip({ level: 9 }),
-        fsSync.createWriteStream(tempPath, { flags: "w" }),
-      );
-    } else {
-      handle = await fs.open(tempPath, "w");
-    }
-    await writeValue(value, false);
-    await flush();
-    if (streamInput) {
-      streamInput.end();
-      await streamPipeline;
-      streamInput = null;
-      streamPipeline = null;
-    } else {
-      await handle.sync();
-      await handle.close();
-      handle = null;
-    }
-    await fs.rename(tempPath, filePath);
-  } catch (error) {
-    try { streamInput?.destroy(error); } catch {}
-    try { await streamPipeline; } catch {}
-    try { if (handle) await handle.close(); } catch {}
-    try { await fs.unlink(tempPath); } catch {}
-    throw error;
-  }
-}
+// Bounded-memory, atomic JSON persistence: lib/json-atomic-writer.js serializes
+// each record natively and flushes small chunks, so saves no longer stall requests.
+const ngWriteJsonAtomicStreaming = writeJsonAtomicStreaming;
 
 const NEXTGEN_RENDER_MEMORY_LIMIT_MB = Math.max(256, Number(process.env.NEXTGEN_RENDER_MEMORY_LIMIT_MB || 2048) || 2048);
 const NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT = Math.max(50, Math.min(90, Number(process.env.NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT || 60) || 60));
@@ -12088,6 +11928,7 @@ app.get("/health", async (req, res) => {
     success: true,
     message: "Backend running",
     build: NEXTGEN_BACKEND_BUILD,
+    performance: { event_loop_delay: eventLoopDelayStats(), db_writes: jsonWriteStats() },
     crm_ayla_reply_build: CRM_AYLA_REPLY_BUILD,
     crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD,
     crm_multiexam_lead_capture_build: CRM_MULTIEXAM_LEAD_CAPTURE_BUILD,
