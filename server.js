@@ -75916,6 +75916,9 @@ let ngV116LastFirstMessageRunAt = 0;
 let ngV116LastScheduledRunAt = 0;
 let ngV116LastDailySessionRunAt = 0;
 
+const NG_V116_AI_BOOKKEEPING_WRITE_MS = Math.max(60_000, Number(process.env.NEXTGEN_HEARTBEAT_AI_BOOKKEEPING_WRITE_MS || 5 * 60 * 1000) || 5 * 60 * 1000);
+let ngV116LastAiBookkeepingWriteAt = 0;
+
 async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = {}) {
   if (!ngV116HeartbeatEnabled()) return { skipped: true, reason: "disabled" };
   if (NG_V116_HEARTBEAT_STATE.running) return { skipped: true, reason: "previous_tick_running" };
@@ -75987,7 +75990,19 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
       noReplyResults = await ngV116RunNoReplyLmsNurture({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_NO_REPLY_LIMIT || 20))), source: `${source}_no_reply_nurture` });
       googleMeetResult = await ngRunGoogleMeetAppointmentScheduler({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_GOOGLE_MEET_LIMIT || 25))), dryRun: false, source: `${source}_google_meet` });
     }
-    const changed = clearResults.length || aiResults.length || firstMessageResults.length || noReplyResults.length || dailySessionResult?.changed || Number(googleMeetResult?.processed || 0);
+    // AI results that only skipped (or failed before sending) change nothing that
+    // must be saved right away; saving the whole CRM database for them every tick
+    // kept the server busy. Their bookkeeping is saved at most every 5 minutes.
+    const aiDelivered = aiResults.some((result = {}) => {
+      if (result.sent || result.queued) return true;
+      if (result.skipped || !result.error || !result.lead_id) return false;
+      const messages = ngLeadConversationMessages(db, result.lead_id);
+      const inbound = ngLatestInbound(messages);
+      return Boolean(inbound && ngHasOutboundAfterInbound(messages, inbound));
+    });
+    const aiBookkeepingDue = aiResults.length > 0 && now - ngV116LastAiBookkeepingWriteAt >= NG_V116_AI_BOOKKEEPING_WRITE_MS;
+    const changed = clearResults.length || aiDelivered || aiBookkeepingDue || firstMessageResults.length || noReplyResults.length || dailySessionResult?.changed || Number(googleMeetResult?.processed || 0);
+    if (changed && aiResults.length) ngV116LastAiBookkeepingWriteAt = now;
     if (changed) await writeCrmDb(db);
     // Run after the older heartbeat snapshot is saved. This worker uses fresh,
     // atomic mutations; never overwrite it with that earlier snapshot.
