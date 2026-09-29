@@ -71052,6 +71052,11 @@ app.post("/admin/roadmap/resequence", async (req, res) => {
     const removeDayIds = Array.isArray(req.body.remove_day_ids)
       ? [...new Set(req.body.remove_day_ids.map((id) => String(id || "").trim()).filter(Boolean))]
       : [];
+    // Days the admin explicitly allows to change even though student progress
+    // is linked to them. Recordings, notes, attendance and completed sessions stay protected.
+    const allowProgressDayIds = new Set(Array.isArray(req.body.allow_student_progress_day_ids)
+      ? req.body.allow_student_progress_day_ids.map((id) => String(id || "").trim()).filter(Boolean)
+      : []);
 
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     if (!firstMovableDayId) return res.status(400).json({ success: false, error: "first_movable_day_id is required" });
@@ -71070,17 +71075,38 @@ app.post("/admin/roadmap/resequence", async (req, res) => {
 
     const today = todayKey();
     const sessionsByDay = ngGetSessionsByRoadmapDayId(db, courseId);
-    const linkedRecordsExist = (day, sessionIds, bucketNames) => {
+    const linkedRecordMatches = (day, sessionIds, key, item) => {
       const dayId = String(day.id || "");
-      return bucketNames.some((bucketName) => Object.entries(db[bucketName] || {}).some(([key, item]) => {
-        if (!item || typeof item !== "object") return false;
-        const itemCourseId = String(item.course_id || item.courseId || "").trim();
-        if (itemCourseId && itemCourseId !== courseId) return false;
-        if ([item.roadmap_day_id, item.day_id].some((id) => String(id || "") === dayId)) return true;
-        if (Array.isArray(item.source_roadmap_day_ids) && item.source_roadmap_day_ids.some((id) => String(id || "") === dayId)) return true;
-        if (sessionIds.has(String(item.session_id || item.live_session_id || ""))) return true;
-        return Boolean(dayId && String(key || "").includes(dayId));
-      }));
+      if (!item || typeof item !== "object") return false;
+      const itemCourseId = String(item.course_id || item.courseId || "").trim();
+      if (itemCourseId && itemCourseId !== courseId) return false;
+      if ([item.roadmap_day_id, item.day_id].some((id) => String(id || "") === dayId)) return true;
+      if (Array.isArray(item.source_roadmap_day_ids) && item.source_roadmap_day_ids.some((id) => String(id || "") === dayId)) return true;
+      if (sessionIds.has(String(item.session_id || item.live_session_id || ""))) return true;
+      return Boolean(dayId && String(key || "").includes(dayId));
+    };
+    const linkedRecordsExist = (day, sessionIds, bucketNames) => bucketNames.some((bucketName) =>
+      Object.entries(db[bucketName] || {}).some(([key, item]) => linkedRecordMatches(day, sessionIds, key, item)));
+    const progressBuckets = ["roadmapProgress", "dailyTaskProgress", "assessmentAttempts", "flashcardProgress", "pointEvents", "weakConceptLogs"];
+    const daySessionIds = (day) => new Set([day.live_session_id, day.session_id, ...(sessionsByDay.get(String(day.id || "")) || []).map((session) => session.id)]
+      .map((id) => String(id || "").trim()).filter(Boolean));
+    // Read-only summary of the student progress linked to a day, so the admin can see what a safety stop is protecting.
+    const progressSummary = (day) => {
+      const sessionIds = daySessionIds(day);
+      const records = {};
+      const students = new Set();
+      const kinds = {};
+      for (const bucketName of progressBuckets) {
+        for (const [key, item] of Object.entries(db[bucketName] || {})) {
+          if (!linkedRecordMatches(day, sessionIds, key, item)) continue;
+          records[bucketName] = (records[bucketName] || 0) + 1;
+          const studentId = String(item.user_id || item.student_id || item.userId || "").trim();
+          if (studentId) students.add(studentId);
+          const kind = `${bucketName}:${String(item.task_key || item.task_id || item.event_type || item.type || item.source || item.status || "record").slice(0, 40)}`;
+          kinds[kind] = (kinds[kind] || 0) + 1;
+        }
+      }
+      return { records, students: students.size, kinds };
     };
     const protectionReason = (day, { todayAllowed = false } = {}) => {
       const date = String(day.date || day.scheduled_date || "").slice(0, 10);
@@ -71101,7 +71127,7 @@ app.post("/admin/roadmap/resequence", async (req, res) => {
       if (linkedRecordsExist(day, sessionIds, ["recordings"])) return "recording attached";
       if (linkedRecordsExist(day, sessionIds, ["notes"])) return "notes attached";
       if (linkedRecordsExist(day, sessionIds, ["attendance"])) return "attendance recorded";
-      if (linkedRecordsExist(day, sessionIds, ["roadmapProgress", "dailyTaskProgress", "assessmentAttempts", "flashcardProgress", "pointEvents", "weakConceptLogs"])) return "student progress recorded";
+      if (!allowProgressDayIds.has(String(day.id || "")) && linkedRecordsExist(day, sessionIds, progressBuckets)) return "student progress recorded";
       if (date === today && !todayAllowed) return "today is protected unless explicitly allowed";
       if (date === today && todayAllowed && daySessions.some((session) => {
         const sessionStatus = String(session.status || "scheduled").trim().toLowerCase();
@@ -71262,7 +71288,13 @@ app.post("/admin/roadmap/resequence", async (req, res) => {
       const changed = beforeIndex !== afterIndex || originalDates.get(id) !== String(after?.date || after?.scheduled_date || "").slice(0, 10) ||
         String(day.system || day.chapter || "") !== String(after?.system || after?.chapter || "") || beforeSystemDay !== afterSystemDay ||
         Boolean(normalizedContentChanges[id]) || removeSet.has(id);
-      if (changed) protectedMoves.push({ roadmap_day_id: id, reason: removeSet.has(id) ? `cannot remove: ${reason}` : reason, from_date: originalDates.get(id) || null, to_date: after?.date || null });
+      if (changed) protectedMoves.push({
+        roadmap_day_id: id,
+        reason: removeSet.has(id) ? `cannot remove: ${reason}` : reason,
+        from_date: originalDates.get(id) || null,
+        to_date: after?.date || null,
+        ...(reason === "student progress recorded" ? { student_progress: progressSummary(day) } : {}),
+      });
     }
     if (protectedMoves.length) {
       return res.status(409).json({
@@ -71283,6 +71315,9 @@ app.post("/admin/roadmap/resequence", async (req, res) => {
         reordered_day_ids: requestedIds,
         removed_day_ids: removeDayIds,
         content_changed_day_ids: Object.keys(normalizedContentChanges),
+        student_progress_days_allowed: suffixTeaching
+          .filter((day) => allowProgressDayIds.has(String(day.id)))
+          .map((day) => ({ roadmap_day_id: String(day.id), student_progress: progressSummary(day) })),
         changed_days: previewMoved,
         sessions_preserved: originalSessions.size,
         assessments_created: 0,

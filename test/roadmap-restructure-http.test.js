@@ -142,7 +142,8 @@ test("roadmap restructure relabels taught days, merges future days and removes s
     },
     notes: { "s-rep2": { id: "note-rep2", course_id: courseId, session_id: "s-rep2", roadmap_day_id: "rep2", title: rep2.title, updated_at: now } },
     attendance: { "att-rep1": { id: "att-rep1", course_id: courseId, session_id: "s-rep1", roadmap_day_id: "rep1", user_id: "student-1", status: "present" } },
-    assessments: {}, assessmentAttempts: {}, flashcards: {}, flashcardProgress: {}, roadmapProgress: {}, dailyTaskProgress: {}, pointEvents: {}, weakConceptLogs: {},
+    assessments: {}, assessmentAttempts: {}, flashcards: {}, flashcardProgress: {}, roadmapProgress: {}, pointEvents: {}, weakConceptLogs: {},
+    dailyTaskProgress: { "dtp-rep5": { id: "dtp-rep5", course_id: courseId, roadmap_day_id: "rep5", user_id: "student-1", task_key: "read_pages", completed: true } },
   };
   await fs.writeFile(livePath, JSON.stringify(liveDb, null, 2));
   await fs.writeFile(path.join(dataDir, "crm-db.json"), JSON.stringify({ sentinel: "crm" }));
@@ -190,7 +191,15 @@ test("roadmap restructure relabels taught days, merges future days and removes s
       ordered_day_ids: ["rep4", "rep5", "imm1", "imm2", ...Array.from({ length: 8 }, (_, i) => `hem${i + 1}`), "imm3", "imm4", "imm5", "imm6", "imm7", "psych1"],
     };
     const before = await fs.readFile(livePath, "utf8");
+    const blocked = await api(baseUrl, "/admin/roadmap/resequence", { method: "POST", token, body: { ...request, dry_run: true } });
+    assert.equal(blocked.response.status, 409, "future day with student progress is protected by default");
+    const blockedDay = blocked.payload.protected_days.find((day) => day.roadmap_day_id === "rep5");
+    assert.equal(blockedDay.reason, "student progress recorded");
+    assert.deepEqual(blockedDay.student_progress, { records: { dailyTaskProgress: 1 }, students: 1, kinds: { "dailyTaskProgress:read_pages": 1 } });
+
+    request.allow_student_progress_day_ids = ["rep5"];
     const preview = await api(baseUrl, "/admin/roadmap/resequence", { method: "POST", token, body: { ...request, dry_run: true } });
+    assert.equal(preview.payload.student_progress_days_allowed?.[0]?.roadmap_day_id, "rep5");
     assert.equal(preview.response.status, 200, JSON.stringify(preview.payload));
     assert.equal(await fs.readFile(livePath, "utf8"), before, "preview must not write");
 
@@ -230,6 +239,10 @@ test("roadmap restructure relabels taught days, merges future days and removes s
     assert.equal(after.recordings["rec-rep2"].system, "Immunology");
     assert.equal(after.notes["s-rep2"].session_id, "s-rep2");
     assert.equal(after.attendance["att-rep1"].session_id, "s-rep1");
+    const keptProgress = after.dailyTaskProgress["dtp-rep5"];
+    assert.equal(keptProgress?.roadmap_day_id, "rep5", "allowed progress is kept, not deleted");
+    assert.equal(keptProgress.user_id, "student-1");
+    assert.equal(keptProgress.completed, true);
     for (const id of ["hem9", "hem10", "hem11"]) assert.equal(after.liveSessions[`s-${id}`].status, "cancelled");
     assert.equal(after.liveSessions["s-imm3"].status, "scheduled");
     assert.match(after.liveSessions["s-rep4"].title, /Immunology/);
