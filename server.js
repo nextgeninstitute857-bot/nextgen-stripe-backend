@@ -690,6 +690,7 @@ import {
   LMS_RECORDING_EMBED_DOMAINS,
   LMS_RECORDING_VIMEO_TRANSFER_BUILD,
   attachVimeoToRecording,
+  vimeoPlayerUrl,
   checkVimeoTransfer,
   reviewedCopyAcceptable,
   startVimeoPullFromZoom,
@@ -98941,6 +98942,43 @@ app.get("/admin/recordings/zoom-transcript", async (req, res) => {
       ...vttSpeechBounds(vtt),
       transcript_text: stripVttToText(vtt),
     });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
+  }
+});
+
+// Links a Vimeo video that is already in the library (e.g. an earlier manual
+// upload) to an LMS recording whose Zoom file no longer exists.
+app.post("/admin/recordings/attach-vimeo", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.recordings.manage");
+    const recordingKey = String(req.body.recording_key || "").trim();
+    const videoId = String(req.body.vimeo_video_id || "").trim();
+    if (!recordingKey || !/^\d+$/.test(videoId)) return res.status(400).json({ success: false, error: "recording_key and a numeric vimeo_video_id are required" });
+    const snapshot = await readLiveDb();
+    if (!snapshot.recordings?.[recordingKey]) return res.status(404).json({ success: false, error: "Recording not found" });
+    const vimeoApi = ngLmsVimeoApi();
+    const video = (await vimeoApi.get(`/videos/${videoId}`, { params: { fields: "uri,name,link,player_embed_url,duration,status,privacy.embed" } })).data || {};
+    if (video.status !== "available") return res.status(409).json({ success: false, error: `Vimeo video is not available (${video.status || "unknown"})` });
+    let embedDomainsError = null;
+    if (video.privacy?.embed === "whitelist") {
+      try {
+        await ensureVimeoEmbedDomains({ videoIds: [videoId], domains: LMS_RECORDING_EMBED_DOMAINS });
+      } catch (error) {
+        embedDomainsError = error.message;
+      }
+    }
+    const now = new Date().toISOString();
+    const db = await readLiveDb();
+    const attached = attachVimeoToRecording(db, recordingKey, {
+      vimeo_video_id: videoId,
+      vimeo_link: video.link || null,
+      vimeo_player_url: vimeoPlayerUrl(video),
+      verified_at: now,
+    }, now);
+    db.recordings[recordingKey] = { ...db.recordings[recordingKey], vimeo_attached_by: user.id, vimeo_attach_source: "existing_library_video" };
+    await writeLiveDb(db);
+    res.json({ success: true, attached, recording_key: recordingKey, vimeo_video_id: videoId, name: video.name || null, duration_seconds: video.duration || null, embed: video.privacy?.embed || null, embed_domains_error: embedDomainsError });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
   }
