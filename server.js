@@ -50027,6 +50027,12 @@ const AYLA_DEFAULT_SETTINGS = {
   updated_at: null
 };
 
+function aylaStoreNeedsInit(db = {}) {
+  return ["copilot_memory", "copilot_chats", "copilot_cost_logs", "copilot_tool_runs", "copilot_actions"].some((key) => !Array.isArray(db[key])) ||
+    !db.copilot_settings || !db.copilot_settings.assistant_name ||
+    Object.keys(AYLA_DEFAULT_SETTINGS).some((key) => !(key in db.copilot_settings));
+}
+
 function aylaEnsureStore(db) {
   if (!Array.isArray(db.copilot_memory)) db.copilot_memory = [];
   if (!Array.isArray(db.copilot_chats)) db.copilot_chats = [];
@@ -50389,8 +50395,12 @@ Now answer the owner's latest message as Ayla.`;
 app.get("/admin/copilot/settings", async (req, res) => {
   try {
     await requireCrmAdmin(req);
-    const db = aylaEnsureStore(await readCrmDb());
-    await writeCrmDb(db);
+    const db = await readCrmDb();
+    // Only persist when the copilot store is actually missing something;
+    // otherwise every admin page load rewrote the whole CRM database.
+    const needsInit = aylaStoreNeedsInit(db);
+    aylaEnsureStore(db);
+    if (needsInit) await writeCrmDb(db);
     res.json({ success: true, settings: aylaPublicSettings(db) });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
