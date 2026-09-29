@@ -105,3 +105,44 @@ test("speech bounds come from the first and last WebVTT cues", async () => {
   assert.deepEqual(vttSpeechBounds(vtt), { cues: 2, first_cue_start_seconds: 5, last_cue_end_seconds: 4362 });
   assert.equal(vttSpeechBounds("").last_cue_end_seconds, null);
 });
+
+test("automatic transfers pick only recent published recordings without a Vimeo copy", async () => {
+  const { selectAutoTransferCandidates } = await import("../lib/lms-recording-vimeo-transfer.js");
+  const now = Date.parse("2026-09-30T00:00:00Z");
+  const base = { published: true, course_id: "c1", uuid: "u", start_time: "2026-09-29T16:00:00Z" };
+  const db = {
+    recordings: {
+      fresh: { ...base, uuid: "u-fresh" },
+      older: { ...base, uuid: "u-older", start_time: "2026-09-28T16:00:00Z" },
+      unpublished: { ...base, published: false },
+      hidden: { ...base, hidden_from_recordings: true },
+      alreadyVimeo: { ...base, vimeo_player_url: "https://player.vimeo.com/video/1" },
+      transferring: { ...base },
+      tooOld: { ...base, start_time: "2026-08-01T16:00:00Z" },
+      noCourse: { ...base, course_id: "" },
+    },
+    recordingVimeoTransfers: { transferring: { vimeo_video_id: "2" } },
+  };
+  assert.deepEqual(selectAutoTransferCandidates(db, { now }), [
+    { recording_key: "older", uuid: "u-older" },
+    { recording_key: "fresh", uuid: "u-fresh" },
+  ]);
+  assert.equal(selectAutoTransferCandidates(db, { now, limit: 1 }).length, 1);
+});
+
+test("automatic Zoom cleanup waits for a verified copy, a saved transcript and the safety delay", async () => {
+  const { selectAutoZoomTrashCandidates } = await import("../lib/lms-recording-vimeo-transfer.js");
+  const now = Date.parse("2026-10-10T00:00:00Z");
+  const transfer = { verified: true, uuid: "u", start_time: "2026-09-29T16:00:00Z" };
+  const db = {
+    recordings: { ok: { transcript_imported: true }, noTranscript: {}, recent: { transcript_imported: true }, unverified: { transcript_imported: true }, trashed: { transcript_imported: true } },
+    recordingVimeoTransfers: {
+      ok: { ...transfer, uuid: "u-ok" },
+      noTranscript: { ...transfer },
+      recent: { ...transfer, start_time: "2026-10-08T16:00:00Z" },
+      unverified: { ...transfer, verified: false },
+      trashed: { ...transfer, zoom_trashed_at: "t" },
+    },
+  };
+  assert.deepEqual(selectAutoZoomTrashCandidates(db, { now }), [{ recording_key: "ok", uuid: "u-ok" }]);
+});
