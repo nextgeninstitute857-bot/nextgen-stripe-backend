@@ -687,6 +687,16 @@ import {
   lmsAutoPublishRecordingsEnabled,
 } from "./lib/lms-recording-auto-publish.js";
 import {
+  LMS_RECORDING_EMBED_DOMAINS,
+  LMS_RECORDING_VIMEO_TRANSFER_BUILD,
+  attachVimeoToRecording,
+  checkVimeoTransfer,
+  startVimeoPullFromZoom,
+  transferState,
+  zoomFileDurationSeconds,
+  zoomMeetingUuidPath,
+} from "./lib/lms-recording-vimeo-transfer.js";
+import {
   LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
   NEXTGEN_KNOWN_MSK_TRANSCRIPT_NOTE_TARGETS,
   applyKnownMskTranscriptNoteCandidate,
@@ -4720,7 +4730,9 @@ function sanitizePublicRecording(recording, notesMeta = {}) {
     source_topic: recording.source_topic || null,
     start_time: recording.start_time || null,
     duration: recording.duration || null,
-    recording_url: recording.recording_url || recording.share_url || null,
+    recording_url: recording.vimeo_link || recording.recording_url || recording.share_url || null,
+    vimeo_player_url: recording.vimeo_player_url || null,
+    playback_provider: recording.vimeo_player_url ? "vimeo" : "zoom",
     share_url: recording.share_url || null,
     transcript_url: recording.transcript_url || null,
     transcript_imported: Boolean(recording.transcript_imported),
@@ -98579,6 +98591,268 @@ app.get("/admin/recordings/automation-status", async (req, res) => {
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+function ngLmsVimeoApi() {
+  const token = String(process.env.VIMEO_ACCESS_TOKEN || process.env.VIMEO_TOKEN || "").trim();
+  if (!token) throw Object.assign(new Error("Vimeo access token is not configured"), { statusCode: 503 });
+  return axios.create({
+    baseURL: "https://api.vimeo.com",
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.vimeo.*+json;version=3.4" },
+    timeout: 60_000,
+  });
+}
+
+async function ngFetchZoomMeetingRecordingFiles(uuid, accessToken) {
+  const response = await axios.get(`https://api.zoom.us/v2/meetings/${zoomMeetingUuidPath(uuid)}/recordings`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return response.data || {};
+}
+
+// Zoom cloud recordings with file sizes and their Vimeo transfer state (read-only).
+app.get("/admin/recordings/zoom-inventory", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.recordings.manage");
+    const validDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+    const to = validDate(req.query.to) ? String(req.query.to) : todayKey();
+    const from = validDate(req.query.from) ? String(req.query.from) : todayKey(addDays(new Date(`${to}T00:00:00Z`), -30));
+    const rangeDays = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000);
+    if (rangeDays < 0 || rangeDays > 31) {
+      return res.status(400).json({ success: false, error: "Use a date range of 31 days or fewer." });
+    }
+    const token = await getZoomAccessToken();
+    const meetings = [];
+    let nextPageToken = "";
+    do {
+      const response = await axios.get("https://api.zoom.us/v2/users/me/recordings", {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { from, to, page_size: 300, ...(nextPageToken ? { next_page_token: nextPageToken } : {}) },
+      });
+      meetings.push(...(response.data?.meetings || []));
+      nextPageToken = response.data?.next_page_token || "";
+    } while (nextPageToken);
+
+    const db = await readLiveDb();
+    const transfers = db.recordingVimeoTransfers || {};
+    const items = meetings.map((meeting) => {
+      const files = meeting.recording_files || [];
+      const videoFile = findVideoFile(files);
+      const stored = ngFindStoredZoomRecordingOccurrence(db, meeting);
+      const saved = stored.recording || {};
+      const recordingKey = stored.key || buildRecordingStorageKey({
+        meeting_id: String(meeting.id || ""),
+        uuid: meeting.uuid,
+        start_time: meeting.start_time,
+        file_id: videoFile?.id,
+        recording_type: videoFile?.recording_type,
+        file_type: videoFile?.file_type,
+        recording_url: videoFile?.play_url || meeting.share_url || videoFile?.download_url || null,
+      });
+      const transfer = transfers[recordingKey] || null;
+      return {
+        recording_key: recordingKey,
+        uuid: meeting.uuid,
+        meeting_id: String(meeting.id || ""),
+        start_time: meeting.start_time,
+        topic: saved.topic || meeting.topic || null,
+        source_topic: meeting.topic || null,
+        published: saved.published === true,
+        hidden_from_recordings: saved.hidden_from_recordings === true,
+        session_id: saved.session_id || null,
+        transcript_imported: saved.transcript_imported === true,
+        duration_minutes: meeting.duration ?? null,
+        total_size_bytes: files.reduce((sum, file) => sum + Number(file.file_size || 0), 0),
+        video_file: videoFile ? {
+          id: videoFile.id,
+          size_bytes: Number(videoFile.file_size || 0),
+          recording_type: videoFile.recording_type || null,
+          duration_seconds: zoomFileDurationSeconds(videoFile),
+        } : null,
+        transfer: transfer ? {
+          state: transferState(transfer),
+          vimeo_video_id: transfer.vimeo_video_id || null,
+          vimeo_link: transfer.vimeo_link || null,
+          vimeo_status: transfer.vimeo_status || null,
+          vimeo_duration_seconds: transfer.vimeo_duration_seconds || null,
+          error: transfer.error || null,
+        } : { state: "not_started" },
+      };
+    });
+    res.json({
+      success: true,
+      build: LMS_RECORDING_VIMEO_TRANSFER_BUILD,
+      from,
+      to,
+      count: items.length,
+      total_size_bytes: items.reduce((sum, item) => sum + item.total_size_bytes, 0),
+      recordings: items,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
+  }
+});
+
+// Starts Vimeo pull uploads straight from Zoom for the given recordings, all in parallel.
+app.post("/admin/recordings/vimeo-transfer", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.recordings.manage");
+    const requested = (Array.isArray(req.body.recordings) ? req.body.recordings : [])
+      .map((item) => ({ recording_key: String(item?.recording_key || "").trim(), uuid: String(item?.uuid || "").trim() }))
+      .filter((item) => item.recording_key && item.uuid);
+    if (!requested.length) return res.status(400).json({ success: false, error: "recordings [{ recording_key, uuid }] are required" });
+    if (requested.length > 60) return res.status(400).json({ success: false, error: "Transfer at most 60 recordings per request" });
+
+    const snapshot = await readLiveDb();
+    const existing = snapshot.recordingVimeoTransfers || {};
+    const retryFailed = req.body.retry_failed === true;
+    const toStart = requested.filter((item) => {
+      const state = transferState(existing[item.recording_key] || {});
+      return state === "not_started" || (retryFailed && state === "failed");
+    });
+    const skipped = requested.filter((item) => !toStart.includes(item))
+      .map((item) => ({ recording_key: item.recording_key, state: transferState(existing[item.recording_key] || {}) }));
+    if (req.body.dry_run !== false) {
+      return res.json({ success: true, dry_run: true, would_start: toStart.map((item) => item.recording_key), skipped });
+    }
+
+    const zoomToken = await getZoomAccessToken();
+    const vimeoApi = ngLmsVimeoApi();
+    const results = await Promise.allSettled(toStart.map(async (item) => {
+      const meeting = await ngFetchZoomMeetingRecordingFiles(item.uuid, zoomToken);
+      const videoFile = findVideoFile(meeting.recording_files || []);
+      const saved = snapshot.recordings?.[item.recording_key] || {};
+      const startLabel = String(meeting.start_time || "").slice(0, 10);
+      const name = `${saved.topic || meeting.topic || "NextGen live class"} (${startLabel})`;
+      const vimeo = await startVimeoPullFromZoom({
+        vimeoApi,
+        zoomAccessToken: zoomToken,
+        videoFile,
+        name,
+        description: `NextGen USMLE live class recording. Zoom meeting ${meeting.id || ""}, ${meeting.start_time || ""}.`,
+      });
+      let embedDomainsError = null;
+      try {
+        await ensureVimeoEmbedDomains({ videoIds: [vimeo.vimeo_video_id], domains: LMS_RECORDING_EMBED_DOMAINS });
+      } catch (error) {
+        embedDomainsError = error.message;
+      }
+      return {
+        recording_key: item.recording_key,
+        uuid: item.uuid,
+        meeting_id: String(meeting.id || ""),
+        start_time: meeting.start_time || null,
+        name,
+        zoom_file_id: videoFile.id,
+        zoom_file_size: Number(videoFile.file_size || 0),
+        zoom_duration_seconds: zoomFileDurationSeconds(videoFile),
+        ...vimeo,
+        embed_domains_error: embedDomainsError,
+      };
+    }));
+
+    const now = new Date().toISOString();
+    const db = await readLiveDb();
+    db.recordingVimeoTransfers = { ...(db.recordingVimeoTransfers || {}) };
+    const started = [];
+    const failed = [];
+    results.forEach((result, index) => {
+      const key = toStart[index].recording_key;
+      if (result.status === "fulfilled") {
+        db.recordingVimeoTransfers[key] = { ...result.value, started_at: now, started_by: user.id, verified: false, error: null };
+        started.push({ recording_key: key, vimeo_video_id: result.value.vimeo_video_id, zoom_file_size: result.value.zoom_file_size });
+      } else {
+        const message = result.reason?.response?.data?.error || result.reason?.response?.data?.message || result.reason?.message || "Transfer failed";
+        db.recordingVimeoTransfers[key] = { ...(db.recordingVimeoTransfers[key] || {}), recording_key: key, uuid: toStart[index].uuid, error: String(message), failed_at: now };
+        failed.push({ recording_key: key, error: String(message) });
+      }
+    });
+    await writeLiveDb(db);
+    res.json({ success: true, dry_run: false, started, failed, skipped });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
+  }
+});
+
+// Checks Vimeo processing; verified copies become the LMS playback source.
+app.post("/admin/recordings/vimeo-transfer/refresh", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.recordings.manage");
+    const snapshot = await readLiveDb();
+    const pending = Object.entries(snapshot.recordingVimeoTransfers || {})
+      .filter(([, transfer]) => transfer.vimeo_video_id && transfer.verified !== true);
+    const vimeoApi = ngLmsVimeoApi();
+    const checks = await Promise.allSettled(pending.map(([, transfer]) => checkVimeoTransfer({ vimeoApi, transfer })));
+
+    const now = new Date().toISOString();
+    const db = await readLiveDb();
+    db.recordingVimeoTransfers = { ...(db.recordingVimeoTransfers || {}) };
+    const summary = { verified: [], processing: [], failed: [] };
+    checks.forEach((check, index) => {
+      const [key] = pending[index];
+      const current = db.recordingVimeoTransfers[key];
+      if (!current) return;
+      if (check.status === "rejected") {
+        summary.processing.push({ recording_key: key, note: check.reason?.message || "Vimeo check failed" });
+        return;
+      }
+      const next = { ...current, ...check.value, checked_at: now };
+      if (check.value.verified) {
+        next.verified_at = now;
+        next.attached_to_recording = attachVimeoToRecording(db, key, next, now);
+        summary.verified.push({ recording_key: key, vimeo_link: next.vimeo_link, attached_to_recording: next.attached_to_recording });
+      } else if (check.value.error) {
+        summary.failed.push({ recording_key: key, error: check.value.error });
+      } else {
+        summary.processing.push({ recording_key: key, vimeo_status: check.value.vimeo_status, transcode: check.value.vimeo_transcode_status });
+      }
+      db.recordingVimeoTransfers[key] = next;
+    });
+    await writeLiveDb(db);
+    res.json({ success: true, checked: pending.length, ...summary });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
+  }
+});
+
+// Moves Zoom recordings to the Zoom trash (recoverable for 30 days), only after a verified Vimeo copy exists.
+app.post("/admin/recordings/zoom-trash", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.recordings.manage");
+    if (String(req.body.confirm || "") !== "MOVE_TO_ZOOM_TRASH") {
+      return res.status(400).json({ success: false, error: "Exact confirmation is required: MOVE_TO_ZOOM_TRASH" });
+    }
+    const keys = [...new Set((Array.isArray(req.body.recording_keys) ? req.body.recording_keys : []).map((key) => String(key || "").trim()).filter(Boolean))];
+    const snapshot = await readLiveDb();
+    const transfers = snapshot.recordingVimeoTransfers || {};
+    const notVerified = keys.filter((key) => transfers[key]?.verified !== true || !transfers[key]?.uuid);
+    if (!keys.length || notVerified.length) {
+      return res.status(409).json({ success: false, error: "Only recordings with a verified Vimeo copy can be moved to the Zoom trash", not_verified: notVerified });
+    }
+    const zoomToken = await getZoomAccessToken();
+    const results = await Promise.allSettled(keys.map((key) => axios.delete(
+      `https://api.zoom.us/v2/meetings/${zoomMeetingUuidPath(transfers[key].uuid)}/recordings`,
+      { headers: { Authorization: `Bearer ${zoomToken}` }, params: { action: "trash" } },
+    )));
+    const now = new Date().toISOString();
+    const db = await readLiveDb();
+    db.recordingVimeoTransfers = { ...(db.recordingVimeoTransfers || {}) };
+    const trashed = [];
+    const failed = [];
+    results.forEach((result, index) => {
+      const key = keys[index];
+      if (result.status === "fulfilled") {
+        db.recordingVimeoTransfers[key] = { ...db.recordingVimeoTransfers[key], zoom_trashed_at: now, zoom_trashed_by: user.id };
+        trashed.push(key);
+      } else {
+        failed.push({ recording_key: key, error: result.reason?.response?.data?.message || result.reason?.message || "Zoom delete failed" });
+      }
+    });
+    await writeLiveDb(db);
+    res.json({ success: true, trashed, failed });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
   }
 });
 
