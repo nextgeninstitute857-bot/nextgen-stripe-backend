@@ -68071,7 +68071,10 @@ function ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, options = {}) {
     session.duration_minutes = Number(session.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES;
     session.instructor_id = session.instructor_id || null;
     session.instructor_name = session.instructor_name || course?.instructor_name || "Dr. Ahmad";
-    session.status = String(session.status || "scheduled").toLowerCase() === "completed" ? session.status : "scheduled";
+    const existingStatus = String(session.status || "scheduled").trim().toLowerCase();
+    session.status = ["completed", "ended", "past", "live", "in_progress", "in-progress"].includes(existingStatus)
+      ? session.status
+      : "scheduled";
     session.roadmap_day_id = day.id;
     session.day_number = day.day_number || null;
     session.instructional_day_number = day.instructional_day_number || day.day_number || null;
@@ -68575,16 +68578,29 @@ function ngSyncRoadmapSequenceMetadata(db, roadmap, { actorId = null } = {}) {
   return { changed: changedTotal, buckets: counts };
 }
 
-function ngRecalculateRoadmapSchedule(db, roadmap, { startDate = "", skipSundays = true, actorId = null } = {}) {
+function ngRecalculateRoadmapSchedule(db, roadmap, {
+  startDate = "",
+  skipSundays = true,
+  actorId = null,
+  preserveDatesByDayId = null,
+} = {}) {
   if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) return roadmap;
   const firstDate = startDate || roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
   let cursor = ngNextStudyDate(new Date(`${firstDate}T00:00:00`), skipSundays);
   const sequenceEntries = ngRoadmapSequenceEntries(roadmap.days);
+  const preservedDates = preserveDatesByDayId instanceof Map
+    ? preserveDatesByDayId
+    : new Map(Object.entries(preserveDatesByDayId || {}));
   sequenceEntries.forEach(({ day, scheduleSlotNumber, instructionalDayNumber, systemDay, noClass }) => {
     cursor = ngNextStudyDate(cursor, skipSundays);
     const scheduleException = ngRoadmapActiveScheduleException(roadmap, day);
     const scheduledDate = String(scheduleException?.override_date || scheduleException?.move_to_date || "").trim();
-    const effectiveCursor = scheduledDate ? new Date(`${scheduledDate}T00:00:00`) : new Date(cursor);
+    const preservedDate = String(preservedDates.get(String(day.id || "")) || "").slice(0, 10);
+    const effectiveCursor = preservedDate
+      ? new Date(`${preservedDate}T00:00:00`)
+      : scheduledDate
+        ? new Date(`${scheduledDate}T00:00:00`)
+        : new Date(cursor);
     day.schedule_slot_number = scheduleSlotNumber;
     day.order = scheduleSlotNumber;
     day.day_number = noClass ? null : instructionalDayNumber;
@@ -68592,7 +68608,7 @@ function ngRecalculateRoadmapSchedule(db, roadmap, { startDate = "", skipSundays
     day.system_day = noClass ? null : systemDay;
     day.day_in_system = noClass ? null : systemDay;
     day.week_number = noClass ? Math.ceil(scheduleSlotNumber / 7) : Math.ceil(instructionalDayNumber / 7);
-    day.date = dateOnly(effectiveCursor);
+    day.date = preservedDate || dateOnly(effectiveCursor);
     day.scheduled_date = day.date;
     day.schedule_exception_id = scheduleException?.id || null;
     day.schedule_exception_active = Boolean(scheduleException);
@@ -70381,8 +70397,9 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
     const requestedSystem = String(req.body.system || req.body.chapter || "").trim();
     const suppliedDays = ngSafeJsonArrayFromBody(req.body.days || req.body.new_days || req.body.rows || []);
     const quickAdd = req.body.quick_add === true || String(req.body.quick_add || "").toLowerCase() === "true";
+    const useMasterMap = req.body.use_master_map === true || String(req.body.use_master_map || "").toLowerCase() === "true";
     const requestedCount = Number(req.body.count ?? suppliedDays.length ?? 0);
-    const requestedDays = suppliedDays.length
+    let requestedDays = suppliedDays.length
       ? suppliedDays
       : quickAdd && requestedCount > 0
         ? Array.from({ length: requestedCount }, () => ({}))
@@ -70398,7 +70415,8 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
 
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     if (!requestedSystem) return res.status(400).json({ success: false, error: "system is required" });
-    if (!requestedDays.length) {
+    if (requestedCount > 14) return res.status(400).json({ success: false, error: "A maximum of 14 system days can be added in one operation" });
+    if (!requestedDays.length && !(useMasterMap && requestedCount > 0)) {
       return res.status(400).json({
         success: false,
         error: "days must contain at least one real teaching packet; blank or dummy roadmap days are not created",
@@ -70407,10 +70425,10 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
     if (requestedDays.length > 14) {
       return res.status(400).json({ success: false, error: "A maximum of 14 system days can be added in one operation" });
     }
-    if (requestedCount && requestedCount !== requestedDays.length) {
+    if (requestedDays.length && requestedCount && requestedCount !== requestedDays.length) {
       return res.status(400).json({ success: false, error: "count must match the number of supplied days" });
     }
-    if (reuseAdjacentStartedDays > requestedDays.length) {
+    if (reuseAdjacentStartedDays > Math.max(requestedDays.length, requestedCount)) {
       return res.status(400).json({ success: false, error: "reuse_adjacent_started_days cannot exceed the number of added system days" });
     }
 
@@ -70429,28 +70447,88 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
         return key === normalizedRequestedSystem;
       });
 
-    if (!matchingIndexes.length) {
+    if (!matchingIndexes.length && !afterDayId && !((useMasterMap || quickAdd) && requestedCount > 0)) {
       return res.status(404).json({ success: false, error: `No existing ${requestedSystem} teaching block was found` });
     }
 
-    const lastSystemEntry = matchingIndexes[matchingIndexes.length - 1];
+    const lastSystemEntry = matchingIndexes[matchingIndexes.length - 1] || null;
     const terminalSystemDayIsAssessment = Boolean(
-      lastSystemEntry.day.assessment_day ||
-      lastSystemEntry.day.assessment_id ||
-      /(?:system[\s-]*end|grand\s+system).*assessment|assessment.*correction/i.test(String(lastSystemEntry.day.title || lastSystemEntry.day.assessment_type || ""))
+      lastSystemEntry && (
+        lastSystemEntry.day.assessment_day ||
+        lastSystemEntry.day.assessment_id ||
+        /(?:system[\s-]*end|grand\s+system).*assessment|assessment.*correction/i.test(String(lastSystemEntry.day.title || lastSystemEntry.day.assessment_type || ""))
+      )
     );
     const explicitAnchorEntry = afterDayId
-      ? matchingIndexes.find((item) => String(item.day.id || "") === afterDayId) || null
+      ? roadmap.days
+        .map((day, index) => ({ day, index }))
+        .find((item) => String(item.day.id || "") === afterDayId && !ngRoadmapDayIsNoClass(item.day)) || null
       : null;
     if (afterDayId && !explicitAnchorEntry) {
-      return res.status(400).json({ success: false, error: "after_day_id must identify a teaching day in the selected system" });
+      return res.status(400).json({ success: false, error: "after_day_id must identify any existing teaching day" });
     }
-    const defaultInsertionIndex = terminalSystemDayIsAssessment ? lastSystemEntry.index : lastSystemEntry.index + 1;
+    let defaultInsertionIndex = lastSystemEntry
+      ? (terminalSystemDayIsAssessment ? lastSystemEntry.index : lastSystemEntry.index + 1)
+      : roadmap.days.length;
+    if (!lastSystemEntry) {
+      while (defaultInsertionIndex > 0) {
+        const trailingDay = roadmap.days[defaultInsertionIndex - 1];
+        const isTrailingAssessment = Boolean(
+          trailingDay?.assessment_day || trailingDay?.assessment_id || trailingDay?.weekly_assessment_id || trailingDay?.grand_assessment_id ||
+          /(?:system[\s-]*end|grand\s+system).*assessment|assessment.*correction/i.test(String(trailingDay?.title || trailingDay?.assessment_type || ""))
+        );
+        if (!isTrailingAssessment) break;
+        defaultInsertionIndex -= 1;
+      }
+    }
     const insertionIndex = explicitAnchorEntry
       ? (explicitAnchorEntry.day.assessment_day ? explicitAnchorEntry.index : explicitAnchorEntry.index + 1)
       : defaultInsertionIndex;
-    const insertionAnchorEntry = explicitAnchorEntry || [...matchingIndexes].reverse().find((item) => item.index < insertionIndex) || lastSystemEntry;
-    const canonicalSystem = String(lastSystemEntry.day.system || lastSystemEntry.day.chapter || requestedSystem).trim();
+    const insertionAnchorEntry = explicitAnchorEntry || [...roadmap.days]
+      .map((day, index) => ({ day, index }))
+      .reverse()
+      .find((item) => item.index < insertionIndex && !ngRoadmapDayIsNoClass(item.day)) || lastSystemEntry;
+    if (!insertionAnchorEntry?.day) {
+      return res.status(409).json({ success: false, error: "Choose an existing teaching day before adding a new system" });
+    }
+    const canonicalSystem = String(lastSystemEntry?.day.system || lastSystemEntry?.day.chapter || ngNormalizeMasterMapSystemName(requestedSystem) || requestedSystem).trim();
+    const currentSystemDayCount = matchingIndexes.filter((item) => item.index < insertionIndex).length;
+    if (useMasterMap && !suppliedDays.length) {
+      const requestedStartDay = Number(req.body.start_system_day || 0) || currentSystemDayCount + 1;
+      if (requestedStartDay !== currentSystemDayCount + 1) {
+        return res.status(409).json({ success: false, error: `Map-based insertion at this position must start at ${canonicalSystem} Day ${currentSystemDayCount + 1}` });
+      }
+      const targetSystem = ngNormalizeMasterMapSystemName(canonicalSystem);
+      const mapRows = ngGetStoredMasterRows(db)
+        .filter((row) => ngNormalizeMasterMapSystemName(row.system) === targetSystem)
+        .sort((left, right) => Number(left.system_day || left.day_in_system || 0) - Number(right.system_day || right.day_in_system || 0));
+      requestedDays = Array.from({ length: requestedCount }, (_, index) => {
+        const targetDay = requestedStartDay + index;
+        return mapRows.find((row) => Number(row.system_day || row.day_in_system || 0) === targetDay) || null;
+      });
+      const missingMappedDays = requestedDays
+        .map((row, index) => row ? null : requestedStartDay + index)
+        .filter((day) => day !== null);
+      if (missingMappedDays.length) {
+        return res.status(409).json({
+          success: false,
+          error: `The stored master map has no ${targetSystem} packet(s) for day(s) ${missingMappedDays.join(", ")}. Add content to the map or enter each packet manually.`,
+        });
+      }
+    }
+    if (!requestedDays.length) {
+      return res.status(400).json({
+        success: false,
+        error: "days must contain at least one real teaching packet; blank or dummy roadmap days are not created",
+      });
+    }
+    if (requestedDays.length > 14) return res.status(400).json({ success: false, error: "A maximum of 14 system days can be added in one operation" });
+    if (requestedCount && requestedCount !== requestedDays.length) {
+      return res.status(400).json({ success: false, error: "count must match the number of supplied days" });
+    }
+    if (reuseAdjacentStartedDays > requestedDays.length) {
+      return res.status(400).json({ success: false, error: "reuse_adjacent_started_days cannot exceed the number of added system days" });
+    }
     if (reuseAdjacentStartedDays > 0 && insertionIndex !== defaultInsertionIndex) {
       return res.status(400).json({ success: false, error: "Started adjacent days can only be recovered when extending the end of a system block" });
     }
@@ -70533,7 +70611,6 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
 
     const meaningfulDays = [];
     const existingSystemDaysTotal = matchingIndexes.length;
-    const currentSystemDayCount = matchingIndexes.filter((item) => item.index < insertionIndex).length;
     for (let index = 0; index < requestedDays.length; index += 1) {
       const raw = requestedDays[index] && typeof requestedDays[index] === "object" ? requestedDays[index] : {};
       const systemDay = currentSystemDayCount + index + 1;
@@ -70563,7 +70640,8 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
         : Array.isArray(insertionAnchorEntry.day.task_items) && insertionAnchorEntry.day.task_items.length
           ? JSON.parse(JSON.stringify(insertionAnchorEntry.day.task_items))
           : ngBuildDefaultTaskItems({ assessment_day: Boolean(raw.assessment_day) });
-      const quickDescription = `Live ${canonicalSystem} teaching day. Session notes, the class recording, review cards, and any connected assessment remain attached to this roadmap day as they are published.`;
+      const scheduleTaskItems = inheritedTaskItems.filter((item) => String(item?.key || item?.id || "") !== "assessment_completed");
+      const quickDescription = `Live ${canonicalSystem} teaching day. Session notes, the class recording, and review cards remain attached to this roadmap day as they are published.`;
       const quickHomework = "Review the live-session notes and recording, complete the assigned follow-up work, and submit the connected daily tasks.";
       const normalized = ngNormalizeAdminRoadmapPayload(
         {
@@ -70574,9 +70652,9 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
           resources: Array.isArray(raw.resources) && raw.resources.length
             ? raw.resources
             : rowQuickAdd
-              ? ["Live class", "Class notes", "Recording", "Review cards", "Assessment"]
+              ? ["Live class", "Class notes", "Recording", "Review cards"]
               : raw.resources,
-          task_items: inheritedTaskItems,
+          task_items: scheduleTaskItems,
           system: canonicalSystem,
           chapter: raw.chapter || canonicalSystem,
           system_day: systemDay,
@@ -70586,6 +70664,8 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
           roadmap_status: "scheduled",
           uworld_qids: qids,
           mapped_uworld_qids: qids,
+          assessment_day: false,
+          assessment_task: "",
           is_published: raw.is_published !== false,
         },
         {
@@ -70602,7 +70682,11 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       normalized.live_teaching_topic = String(raw.live_teaching_topic || raw.topic || raw.first_aid_topics || contentTitle).trim();
       normalized.lecture_id = raw.lecture_id || raw.video_library_lecture_id || null;
       normalized.community_prompt = String(raw.community_prompt || "").trim();
-      normalized.assessment_task = String(raw.assessment_task || "").trim();
+      normalized.assessment_day = false;
+      normalized.assessment_task = "";
+      normalized.assessment_id = null;
+      normalized.weekly_assessment_id = null;
+      normalized.grand_assessment_id = null;
       normalized.live_session_id = null;
       normalized.session_id = null;
       normalized.source = "admin_system_extension";
@@ -70692,6 +70776,7 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
         insertion_base_system_day: currentSystemDayCount,
         added_system_days: meaningfulDays.length,
         roadmap_days_added: meaningfulDays.length,
+        assessments_created: 0,
         reused_adjacent_started_days: reusedEntries.length,
         insertion_after_roadmap_day_id: insertionAnchorEntry.day.id,
         terminal_assessment_moved_to_end: terminalSystemDayIsAssessment,
@@ -70844,6 +70929,7 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       system: canonicalSystem,
       added_system_days: meaningfulDays.length,
       roadmap_days_added: meaningfulDays.length,
+      assessments_created: 0,
       reused_adjacent_started_days: reusedEntries.length,
       instructional_days: workingRoadmap.instructional_days,
       schedule_slots: workingRoadmap.schedule_slots,
@@ -70867,6 +70953,494 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to extend roadmap system" });
+  }
+});
+
+// Preview/apply a future roadmap suffix shuffle while keeping the completed
+// prefix, roadmap-day ids, linked sessions, and published learning records.
+// Teaching-content fields that belong to "what is taught on this day". Identity
+// fields (id, date, live session, recordings, notes, assessments, status) are
+// never copied, so a day can be relabelled without detaching its class history.
+const NG_ROADMAP_CONTENT_FIELDS = Object.freeze([
+  "title", "description", "resources", "resource_links", "uworld_target", "first_aid_topics",
+  "live_teaching_topic", "first_aid_pages", "lecture_id", "lecture_title", "video_library_lecture",
+  "uworld_qids", "mapped_uworld_qids", "qid_count", "homework", "tasks", "task_items",
+  "available_points", "points_config", "assessment_task",
+]);
+
+function ngRoadmapPageRange(value = "") {
+  const match = String(value || "").match(/(\d{1,4})\s*[–-]\s*(\d{1,4})/);
+  if (match) return { start: Number(match[1]), end: Number(match[2]), text: `${match[1]}–${match[2]}`, raw: match[0] };
+  const single = String(value || "").match(/\b(\d{1,4})\b/);
+  return single ? { start: Number(single[1]), end: Number(single[1]), text: single[1], raw: single[0] } : null;
+}
+
+function ngReplaceAllInJson(value, from, to) {
+  if (!from || from === to) return value;
+  const json = JSON.stringify(value);
+  const escapedFrom = JSON.stringify(String(from)).slice(1, -1);
+  const escapedTo = JSON.stringify(String(to)).slice(1, -1);
+  return JSON.parse(json.split(escapedFrom).join(escapedTo));
+}
+
+// Builds a day's teaching content from one or more original source days.
+// One source + no page override = exact copy. Several sources = QIDs and
+// lectures are unioned, and the page range, QID list and lecture name are
+// rewritten everywhere they appear (title, description, homework, tasks).
+function ngBuildRoadmapDayContent(sources = [], { pages = "" } = {}) {
+  const valid = sources.filter(Boolean);
+  if (!valid.length) return null;
+  const base = {};
+  for (const field of NG_ROADMAP_CONTENT_FIELDS) {
+    if (valid[0][field] !== undefined) base[field] = JSON.parse(JSON.stringify(valid[0][field]));
+  }
+  const requestedRange = ngRoadmapPageRange(pages);
+  if (valid.length === 1 && !requestedRange) return base;
+
+  const qids = [];
+  for (const source of valid) {
+    for (const qid of ngNormalizeQidList(source.uworld_qids || source.mapped_uworld_qids || [])) {
+      if (!qids.includes(qid)) qids.push(qid);
+    }
+  }
+  const lectures = [];
+  for (const source of valid) {
+    for (const lecture of String(source.lecture_title || source.video_library_lecture || "").split(/\s+\+\s+/)) {
+      const cleanLecture = lecture.trim();
+      if (cleanLecture && !lectures.includes(cleanLecture)) lectures.push(cleanLecture);
+    }
+  }
+  const ranges = valid.map((source) => ngRoadmapPageRange(source.first_aid_pages || source.fa_pages)).filter(Boolean);
+  const mergedRange = requestedRange || (ranges.length
+    ? { text: `${Math.min(...ranges.map((r) => r.start))}–${Math.max(...ranges.map((r) => r.end))}` }
+    : null);
+
+  let content = base;
+  const baseQids = ngNormalizeQidList(valid[0].uworld_qids || valid[0].mapped_uworld_qids || []);
+  const baseRange = ngRoadmapPageRange(valid[0].first_aid_pages || valid[0].fa_pages);
+  const baseLecture = String(valid[0].lecture_title || valid[0].video_library_lecture || "").trim();
+  if (baseQids.length) content = ngReplaceAllInJson(content, baseQids.join(", "), qids.join(", "));
+  if (baseRange && mergedRange) content = ngReplaceAllInJson(content, baseRange.raw, mergedRange.text);
+  if (baseLecture && lectures.length) content = ngReplaceAllInJson(content, baseLecture, lectures.join(" + "));
+  content.uworld_qids = qids;
+  content.mapped_uworld_qids = qids;
+  if (content.qid_count !== undefined) content.qid_count = qids.length;
+  if (lectures.length) {
+    content.lecture_title = lectures.join(" + ");
+    content.video_library_lecture = lectures.join(" + ");
+  }
+  return content;
+}
+
+app.post("/admin/roadmap/resequence", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const firstMovableDayId = String(req.body.first_movable_day_id || "").trim();
+    const orderedDayIds = Array.isArray(req.body.ordered_day_ids)
+      ? req.body.ordered_day_ids.map((id) => String(id || "").trim()).filter(Boolean)
+      : [];
+    const systemChanges = req.body.system_changes && typeof req.body.system_changes === "object"
+      ? req.body.system_changes
+      : {};
+    const allowTodayUnstarted = req.body.allow_today_unstarted === true;
+    const dryRun = req.body.dry_run !== false;
+    const contentChanges = req.body.content_changes && typeof req.body.content_changes === "object"
+      ? req.body.content_changes
+      : {};
+    const removeDayIds = Array.isArray(req.body.remove_day_ids)
+      ? [...new Set(req.body.remove_day_ids.map((id) => String(id || "").trim()).filter(Boolean))]
+      : [];
+
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    if (!firstMovableDayId) return res.status(400).json({ success: false, error: "first_movable_day_id is required" });
+    if (!orderedDayIds.length) return res.status(400).json({ success: false, error: "ordered_day_ids must include the full movable teaching sequence" });
+
+    const entry = ngFindRoadmapEntryForCourse(db, courseId);
+    const roadmap = entry.roadmap;
+    if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) {
+      return res.status(404).json({ success: false, error: "Roadmap not found or roadmap has no days" });
+    }
+
+    const startIndex = roadmap.days.findIndex((day) => String(day.id || "") === firstMovableDayId);
+    if (startIndex < 0 || ngRoadmapDayIsNoClass(roadmap.days[startIndex])) {
+      return res.status(400).json({ success: false, error: "first_movable_day_id must identify a teaching day in this roadmap" });
+    }
+
+    const today = todayKey();
+    const sessionsByDay = ngGetSessionsByRoadmapDayId(db, courseId);
+    const linkedRecordsExist = (day, sessionIds, bucketNames) => {
+      const dayId = String(day.id || "");
+      return bucketNames.some((bucketName) => Object.entries(db[bucketName] || {}).some(([key, item]) => {
+        if (!item || typeof item !== "object") return false;
+        const itemCourseId = String(item.course_id || item.courseId || "").trim();
+        if (itemCourseId && itemCourseId !== courseId) return false;
+        if ([item.roadmap_day_id, item.day_id].some((id) => String(id || "") === dayId)) return true;
+        if (Array.isArray(item.source_roadmap_day_ids) && item.source_roadmap_day_ids.some((id) => String(id || "") === dayId)) return true;
+        if (sessionIds.has(String(item.session_id || item.live_session_id || ""))) return true;
+        return Boolean(dayId && String(key || "").includes(dayId));
+      }));
+    };
+    const protectionReason = (day, { todayAllowed = false } = {}) => {
+      const date = String(day.date || day.scheduled_date || "").slice(0, 10);
+      const status = String(day.roadmap_status || day.status || "").trim().toLowerCase();
+      if (date && date < today) return "past date";
+      if (["completed", "in_progress", "in-progress", "ended", "past"].includes(status)) return "completed or in-progress status";
+
+      const daySessions = sessionsByDay.get(String(day.id || "")) || [];
+      const sessionIds = new Set([day.live_session_id, day.session_id, ...daySessions.map((session) => session.id)]
+        .map((id) => String(id || "").trim()).filter(Boolean));
+      const lockedSession = daySessions.find((session) => {
+        const sessionStatus = String(session.status || "scheduled").trim().toLowerCase();
+        return ["completed", "ended", "past", "live", "in_progress", "in-progress"].includes(sessionStatus) ||
+          Boolean(session.recording_url || session.recording_id || session.transcript_url);
+      });
+      if (lockedSession) return "completed/live/recorded session";
+      if (day.recording_link || day.notes_link || day.session_notes_ready || day.session_notes_id) return "recording or notes attached";
+      if (linkedRecordsExist(day, sessionIds, ["recordings"])) return "recording attached";
+      if (linkedRecordsExist(day, sessionIds, ["notes"])) return "notes attached";
+      if (linkedRecordsExist(day, sessionIds, ["attendance"])) return "attendance recorded";
+      if (linkedRecordsExist(day, sessionIds, ["roadmapProgress", "dailyTaskProgress", "assessmentAttempts", "flashcardProgress", "pointEvents", "weakConceptLogs"])) return "student progress recorded";
+      if (date === today && !todayAllowed) return "today is protected unless explicitly allowed";
+      if (date === today && todayAllowed && daySessions.some((session) => {
+        const sessionStatus = String(session.status || "scheduled").trim().toLowerCase();
+        return !["", "scheduled", "pending", "not_started"].includes(sessionStatus);
+      })) return "today's session is not in a safely reschedulable status";
+      return "";
+    };
+
+    const prefixDays = roadmap.days.slice(0, startIndex);
+    const suffixDays = roadmap.days.slice(startIndex);
+    if (suffixDays.some((day) => !day?.id)) {
+      return res.status(409).json({ success: false, error: "Roadmap suffix contains an unidentifiable row; refresh before reordering" });
+    }
+    const suffixTeaching = suffixDays.filter((day) => !ngRoadmapDayIsNoClass(day));
+    const suffixTeachingIds = new Set(suffixTeaching.map((day) => String(day.id)));
+    const invalidRemoval = removeDayIds.find((id) => !suffixTeachingIds.has(id) || id === firstMovableDayId);
+    if (invalidRemoval) {
+      return res.status(400).json({ success: false, error: `remove_day_ids may only contain movable teaching days after the first movable day (${invalidRemoval})` });
+    }
+    const removeSet = new Set(removeDayIds);
+    const expectedIds = suffixTeaching.map((day) => String(day.id)).filter((id) => !removeSet.has(id));
+    const requestedIds = orderedDayIds;
+    if (requestedIds.length !== expectedIds.length || new Set(requestedIds).size !== expectedIds.length ||
+      expectedIds.some((id) => !requestedIds.includes(id))) {
+      return res.status(400).json({ success: false, error: "ordered_day_ids must contain every movable teaching day exactly once (except remove_day_ids) and no other ids" });
+    }
+
+    const rowsByTeachingDay = new Map();
+    let currentTeachingId = "";
+    let lastKeptTeachingId = "";
+    for (const day of suffixDays) {
+      if (ngRoadmapDayIsNoClass(day)) {
+        if (!currentTeachingId) {
+          return res.status(409).json({ success: false, error: "Choose the first teaching day after the fixed prefix; a no-class row cannot start the movable section" });
+        }
+        // No-class rows after a removed day stay with the previous kept day.
+        const ownerId = removeSet.has(currentTeachingId) ? lastKeptTeachingId : currentTeachingId;
+        rowsByTeachingDay.get(ownerId).push(day);
+        continue;
+      }
+      currentTeachingId = String(day.id);
+      if (!removeSet.has(currentTeachingId)) {
+        lastKeptTeachingId = currentTeachingId;
+        rowsByTeachingDay.set(currentTeachingId, [day]);
+      }
+    }
+
+    const idToDay = new Map(roadmap.days.map((day) => [String(day.id || ""), day]));
+    const normalizedChanges = {};
+    for (const [rawDayId, rawSystem] of Object.entries(systemChanges)) {
+      const dayId = String(rawDayId || "").trim();
+      const day = idToDay.get(dayId);
+      const system = ngNormalizeMasterMapSystemName(rawSystem);
+      if (!day || ngRoadmapDayIsNoClass(day) || !system || system === "General") {
+        return res.status(400).json({ success: false, error: `Invalid system reclassification for roadmap day ${dayId || "(missing id)"}` });
+      }
+      normalizedChanges[dayId] = system;
+    }
+
+    // Content changes: replace what is taught on a day (from original source
+    // days), keeping the day's identity, date, class, recording and notes.
+    const originalContentById = new Map(roadmap.days.map((day) => [String(day.id || ""), JSON.parse(JSON.stringify(day))]));
+    const normalizedContentChanges = {};
+    for (const [rawDayId, rawChange] of Object.entries(contentChanges)) {
+      const dayId = String(rawDayId || "").trim();
+      const day = idToDay.get(dayId);
+      const change = rawChange && typeof rawChange === "object" ? rawChange : {};
+      const system = ngNormalizeMasterMapSystemName(change.system || normalizedChanges[dayId] || day?.system || day?.chapter || "");
+      const sourceIds = (Array.isArray(change.source_day_ids) ? change.source_day_ids : [])
+        .map((id) => String(id || "").trim()).filter(Boolean);
+      if (!day || ngRoadmapDayIsNoClass(day) || removeSet.has(dayId) || !system || system === "General") {
+        return res.status(400).json({ success: false, error: `Invalid content change for roadmap day ${dayId || "(missing id)"}` });
+      }
+      if (!sourceIds.length || sourceIds.some((id) => !originalContentById.has(id) || ngRoadmapDayIsNoClass(originalContentById.get(id)))) {
+        return res.status(400).json({ success: false, error: `Content change for ${dayId} needs source_day_ids that are teaching days in this roadmap` });
+      }
+      const content = ngBuildRoadmapDayContent(sourceIds.map((id) => originalContentById.get(id)), { pages: change.first_aid_pages || change.pages || "" });
+      normalizedContentChanges[dayId] = { system, source_day_ids: sourceIds, first_aid_pages: change.first_aid_pages || change.pages || null, content };
+      normalizedChanges[dayId] = system;
+    }
+
+    const orderedSuffix = requestedIds.flatMap((id) => rowsByTeachingDay.get(id) || []);
+    const preservedDatesByDayId = new Map(prefixDays.map((day) => [String(day.id), String(day.date || day.scheduled_date || "").slice(0, 10)]));
+    const originalIndexes = new Map(roadmap.days.map((day, index) => [String(day.id || ""), index]));
+    const originalDates = new Map(roadmap.days.map((day) => [String(day.id || ""), String(day.date || day.scheduled_date || "").slice(0, 10)]));
+    const originalSessions = new Map(roadmap.days
+      .filter((day) => day?.id && !ngRoadmapDayIsNoClass(day) && (day.live_session_id || day.session_id))
+      .map((day) => [String(day.id), String(day.live_session_id || day.session_id)]));
+    const originalDayIds = new Set(roadmap.days.map((day) => String(day.id || "")).filter(Boolean));
+    const assessmentIdsBefore = new Set(Object.keys(db.assessments || {}));
+
+    const prepareRoadmap = (targetDb, targetRoadmap) => {
+      for (const [dayId, system] of Object.entries(normalizedChanges)) {
+        const day = targetRoadmap.days.find((item) => String(item.id || "") === dayId);
+        day.system = system;
+        day.chapter = system;
+        const contentChange = normalizedContentChanges[dayId];
+        if (contentChange?.content) {
+          Object.assign(day, JSON.parse(JSON.stringify(contentChange.content)));
+          day.content_source_day_ids = contentChange.source_day_ids;
+          day.content_changed_at = new Date().toISOString();
+          day.content_changed_by = user.id;
+        }
+      }
+      targetRoadmap.days = [...targetRoadmap.days.slice(0, startIndex), ...orderedSuffix.map((day) => {
+        return targetRoadmap.days.find((item) => String(item.id || "") === String(day.id));
+      })];
+      ngRecalculateRoadmapSchedule(targetDb, targetRoadmap, {
+        startDate: targetRoadmap.start_date || targetRoadmap.settings?.start_date || targetRoadmap.days[0]?.date || today,
+        skipSundays: targetRoadmap.skip_sundays !== false && targetRoadmap.settings?.skip_sundays !== false,
+        actorId: user.id,
+        preserveDatesByDayId: preservedDatesByDayId,
+      });
+
+      const moved = targetRoadmap.days.map((day, index) => {
+        const dayId = String(day.id || "");
+        const before = idToDay.get(dayId);
+        if (!before) return null;
+        const beforeDate = originalDates.get(dayId) || "";
+        const afterDate = String(day.date || day.scheduled_date || "").slice(0, 10);
+        const beforeSystem = String(before.system || before.chapter || "");
+        const afterSystem = String(day.system || day.chapter || "");
+        const changed = originalIndexes.get(dayId) !== index || beforeDate !== afterDate || beforeSystem !== afterSystem ||
+          String(before.title || "") !== String(day.title || "") ||
+          Number(before.system_day || before.day_in_system || 0) !== Number(day.system_day || day.day_in_system || 0);
+        return changed ? {
+          id: dayId,
+          from_date: beforeDate,
+          to_date: afterDate,
+          from_system: beforeSystem,
+          to_system: afterSystem,
+          from_system_day: before.system_day || before.day_in_system || null,
+          to_system_day: day.system_day || day.day_in_system || null,
+          from_title: before.title || "",
+          to_title: day.title || "",
+          session_id: originalSessions.get(dayId) || day.live_session_id || day.session_id || null,
+        } : null;
+      }).filter(Boolean);
+      return moved;
+    };
+
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const previewDb = clone(db);
+    const previewEntry = ngFindRoadmapEntryForCourse(previewDb, courseId);
+    const previewRoadmap = previewEntry.roadmap;
+    const previewMoved = prepareRoadmap(previewDb, previewRoadmap);
+
+    const protectedMoves = [];
+    for (const day of suffixTeaching) {
+      const id = String(day.id);
+      const reason = protectionReason(day, { todayAllowed: allowTodayUnstarted });
+      if (!reason) continue;
+      const afterIndex = previewRoadmap.days.findIndex((item) => String(item.id || "") === id);
+      const beforeIndex = originalIndexes.get(id);
+      const after = previewRoadmap.days[afterIndex];
+      const beforeSystemDay = Number(day.system_day || day.day_in_system || 0);
+      const afterSystemDay = Number(after?.system_day || after?.day_in_system || 0);
+      const changed = beforeIndex !== afterIndex || originalDates.get(id) !== String(after?.date || after?.scheduled_date || "").slice(0, 10) ||
+        String(day.system || day.chapter || "") !== String(after?.system || after?.chapter || "") || beforeSystemDay !== afterSystemDay ||
+        Boolean(normalizedContentChanges[id]) || removeSet.has(id);
+      if (changed) protectedMoves.push({ roadmap_day_id: id, reason: removeSet.has(id) ? `cannot remove: ${reason}` : reason, from_date: originalDates.get(id) || null, to_date: after?.date || null });
+    }
+    if (protectedMoves.length) {
+      return res.status(409).json({
+        success: false,
+        error: "Safety stop: the requested shuffle would move or reclassify a past, completed, recorded, attended, or progress-bearing day. Keep those days fixed and start the shuffle later.",
+        protected_days: protectedMoves,
+      });
+    }
+
+    if (dryRun) {
+      return res.json({
+        success: true,
+        dry_run: true,
+        applied: false,
+        course_id: courseId,
+        first_movable_day_id: firstMovableDayId,
+        locked_prefix_days: prefixDays.filter((day) => !ngRoadmapDayIsNoClass(day)).length,
+        reordered_day_ids: requestedIds,
+        removed_day_ids: removeDayIds,
+        content_changed_day_ids: Object.keys(normalizedContentChanges),
+        changed_days: previewMoved,
+        sessions_preserved: originalSessions.size,
+        assessments_created: 0,
+        roadmap_updated_at: roadmap.updated_at || null,
+        confirmation_required: "RESEQUENCE_ROADMAP",
+        message: "Preview only. No roadmap or learning data changed.",
+      });
+    }
+
+    if (String(req.body.confirm || "").trim().toUpperCase() !== "RESEQUENCE_ROADMAP") {
+      return res.status(400).json({ success: false, error: "Exact confirmation is required: RESEQUENCE_ROADMAP" });
+    }
+    const expectedRoadmapUpdatedAt = String(req.body.expected_roadmap_updated_at || "").trim();
+    if (expectedRoadmapUpdatedAt !== String(roadmap.updated_at || "")) {
+      return res.status(409).json({
+        success: false,
+        error: "Roadmap changed after preview. Refresh and preview the shuffle again before applying.",
+        expected_roadmap_updated_at: expectedRoadmapUpdatedAt,
+        actual_roadmap_updated_at: roadmap.updated_at || null,
+      });
+    }
+
+    await ensureDataDir();
+    const backupDir = path.join(DATA_DIR, "backups");
+    await fs.mkdir(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupPath = path.join(backupDir, `live-session-db-before-roadmap-resequence-${stamp}.json`);
+    try {
+      await fs.copyFile(LIVE_DB_PATH, backupPath);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      await fs.writeFile(backupPath, JSON.stringify(db, null, 2), "utf8");
+    }
+
+    const workingDb = clone(db);
+    const workingEntry = ngFindRoadmapEntryForCourse(workingDb, courseId);
+    const workingRoadmap = workingEntry.roadmap;
+    if (!workingRoadmap || !Array.isArray(workingRoadmap.days)) {
+      return res.status(409).json({ success: false, error: "Roadmap disappeared before the shuffle could be staged", backup_path: backupPath });
+    }
+    const oldDates = new Map(workingRoadmap.days.map((day) => [String(day.id || ""), String(day.date || day.scheduled_date || "").slice(0, 10)]));
+    prepareRoadmap(workingDb, workingRoadmap);
+
+    const shiftedMetadata = {};
+    for (const day of workingRoadmap.days) {
+      const dayId = String(day.id || "");
+      const beforeDate = oldDates.get(dayId) || "";
+      const afterDate = String(day.date || day.scheduled_date || "").slice(0, 10);
+      if (!beforeDate || !afterDate || beforeDate === afterDate) continue;
+      const counts = ngShiftLinkedScheduleMetadata(workingDb, { courseId, day, fromDate: beforeDate, toDate: afterDate, actorId: user.id });
+      for (const [name, count] of Object.entries(counts)) shiftedMetadata[name] = Number(shiftedMetadata[name] || 0) + Number(count || 0);
+    }
+
+    // Removed days: their not-yet-started classes are cancelled (never deleted).
+    const removedDays = [];
+    for (const dayId of removeDayIds) {
+      const cancelledSessions = [];
+      for (const session of Object.values(workingDb.liveSessions || {})) {
+        if (!session?.id || String(session.course_id || "") !== courseId) continue;
+        const linked = String(session.roadmap_day_id || "") === dayId || String(session.id) === String(originalSessions.get(dayId) || "");
+        if (!linked) continue;
+        if (!ngCanMoveOrReuseLiveSession(session)) {
+          return res.status(409).json({ success: false, error: `Safety stop: removed day ${dayId} has a class that already happened`, backup_path: backupPath });
+        }
+        session.status = "cancelled";
+        session.cancelled_reason = "roadmap_day_removed";
+        session.archived_from_active = true;
+        session.updated_by = user.id;
+        session.updated_at = new Date().toISOString();
+        cancelledSessions.push(session.id);
+      }
+      const original = idToDay.get(dayId) || {};
+      removedDays.push({ id: dayId, date: original.date || null, system: original.system || original.chapter || "", title: original.title || "", cancelled_session_ids: cancelledSessions });
+    }
+
+    // Content-changed days keep their recordings: lock each recording to its
+    // own session so the Zoom-topic guard does not unpublish it on restart.
+    const lockedRecordings = [];
+    for (const dayId of Object.keys(normalizedContentChanges)) {
+      const day = workingRoadmap.days.find((item) => String(item.id || "") === dayId);
+      if (!day) continue;
+      const sessionIds = new Set([day.live_session_id, day.session_id, originalSessions.get(dayId)].map((id) => String(id || "")).filter(Boolean));
+      const session = workingDb.liveSessions?.[String(day.live_session_id || day.session_id || "")] || null;
+      const newTitle = String(session?.title || day.title || "");
+      for (const [key, recording] of Object.entries(workingDb.recordings || {})) {
+        if (!recording || !sessionIds.has(String(recording.session_id || ""))) continue;
+        recording.system = day.system;
+        if (newTitle) recording.topic = newTitle;
+        recording.assignment_locked = true;
+        recording.assignment_source = "admin_explicit_session";
+        recording.updated_at = new Date().toISOString();
+        lockedRecordings.push(key);
+      }
+      for (const sessionId of sessionIds) {
+        const note = workingDb.notes?.[sessionId];
+        if (!note || typeof note !== "object") continue;
+        note.system = day.system;
+        if (newTitle && note.title) note.title = newTitle;
+        if (newTitle && note.topic) note.topic = newTitle;
+        note.updated_at = new Date().toISOString();
+      }
+    }
+
+    for (const dayId of originalDayIds) {
+      if (removeSet.has(dayId)) continue;
+      if (!workingRoadmap.days.some((day) => String(day.id || "") === dayId)) {
+        return res.status(409).json({ success: false, error: `Safety stop: roadmap day ${dayId} was not preserved`, backup_path: backupPath });
+      }
+    }
+    for (const [dayId, sessionId] of originalSessions) {
+      if (removeSet.has(dayId)) continue;
+      const day = workingRoadmap.days.find((item) => String(item.id || "") === dayId);
+      if (!day || String(day.live_session_id || day.session_id || "") !== sessionId) {
+        return res.status(409).json({ success: false, error: `Safety stop: live-session identity changed for roadmap day ${dayId}`, backup_path: backupPath });
+      }
+    }
+    const assessmentIdsAfter = new Set(Object.keys(workingDb.assessments || {}));
+    if (assessmentIdsBefore.size !== assessmentIdsAfter.size || [...assessmentIdsBefore].some((id) => !assessmentIdsAfter.has(id))) {
+      return res.status(409).json({ success: false, error: "Safety stop: the shuffle must not create or remove assessments", backup_path: backupPath });
+    }
+
+    workingRoadmap.resequence_events = Array.isArray(workingRoadmap.resequence_events) ? workingRoadmap.resequence_events : [];
+    workingRoadmap.resequence_events.push({
+      id: `roadmap_resequence:${courseId}:${uuid()}`,
+      first_movable_day_id: firstMovableDayId,
+      ordered_day_ids: requestedIds,
+      system_changes: normalizedChanges,
+      content_changes: Object.fromEntries(Object.entries(normalizedContentChanges).map(([id, change]) => [id, { system: change.system, source_day_ids: change.source_day_ids, first_aid_pages: change.first_aid_pages }])),
+      removed_days: removedDays,
+      locked_recordings: lockedRecordings,
+      changed_days: previewMoved,
+      created_by: user.id,
+      created_at: new Date().toISOString(),
+    });
+    workingRoadmap.updated_by = user.id;
+    workingRoadmap.updated_at = new Date().toISOString();
+    workingDb.roadmaps[workingEntry.key || entry.key || courseId] = workingRoadmap;
+    await writeLiveDb(workingDb);
+
+    return res.json({
+      success: true,
+      dry_run: false,
+      applied: true,
+      course_id: courseId,
+      first_movable_day_id: firstMovableDayId,
+      changed_days: previewMoved,
+      removed_days: removedDays,
+      locked_recordings: lockedRecordings.length,
+      preserved_existing_roadmap_days: originalDayIds.size - removeSet.size,
+      preserved_existing_live_sessions: originalSessions.size,
+      shifted_schedule_metadata: shiftedMetadata,
+      assessments_created: 0,
+      backup_path: backupPath,
+      roadmap_updated_at: workingRoadmap.updated_at || null,
+      message: "Roadmap sequence updated. Protected earlier days, live-session identities, recordings, and notes remain attached.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to reorder roadmap systems and days" });
   }
 });
 
