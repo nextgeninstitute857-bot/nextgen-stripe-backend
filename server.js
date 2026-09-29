@@ -695,6 +695,7 @@ import {
   startVimeoPullFromZoom,
   transferState,
   zoomFileDurationSeconds,
+  zoomFragmentReason,
   zoomMeetingUuidPath,
 } from "./lib/lms-recording-vimeo-transfer.js";
 import {
@@ -98859,6 +98860,62 @@ app.post("/admin/recordings/zoom-trash", async (req, res) => {
     });
     await writeLiveDb(db);
     res.json({ success: true, trashed, failed });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
+  }
+});
+
+// Trashes Zoom test/rejoin fragments and empty recordings, re-checked against Zoom first.
+app.post("/admin/recordings/zoom-trash-fragments", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.recordings.manage");
+    const requested = (Array.isArray(req.body.fragments) ? req.body.fragments : [])
+      .map((item) => ({ recording_key: String(item?.recording_key || "").trim(), uuid: String(item?.uuid || "").trim() }))
+      .filter((item) => item.recording_key && item.uuid);
+    if (!requested.length) return res.status(400).json({ success: false, error: "fragments [{ recording_key, uuid }] are required" });
+    const dryRun = req.body.dry_run !== false;
+    if (!dryRun && String(req.body.confirm || "") !== "MOVE_FRAGMENTS_TO_ZOOM_TRASH") {
+      return res.status(400).json({ success: false, error: "Exact confirmation is required: MOVE_FRAGMENTS_TO_ZOOM_TRASH" });
+    }
+    const snapshot = await readLiveDb();
+    const zoomToken = await getZoomAccessToken();
+    const checks = await Promise.allSettled(requested.map(async (item) => {
+      const meeting = await ngFetchZoomMeetingRecordingFiles(item.uuid, zoomToken);
+      const reason = zoomFragmentReason({
+        videoFile: findVideoFile(meeting.recording_files || []),
+        recording: snapshot.recordings?.[item.recording_key] || {},
+        transfer: snapshot.recordingVimeoTransfers?.[item.recording_key] || {},
+      });
+      return { ...item, reason };
+    }));
+    const eligible = [];
+    const refused = [];
+    checks.forEach((check, index) => {
+      if (check.status === "fulfilled" && check.value.reason) eligible.push(check.value);
+      else refused.push({ recording_key: requested[index].recording_key, error: check.status === "rejected" ? (check.reason?.response?.data?.message || check.reason?.message) : "Not a fragment: copy it to Vimeo first" });
+    });
+    if (dryRun) return res.json({ success: true, dry_run: true, eligible, refused });
+
+    const results = await Promise.allSettled(eligible.map((item) => axios.delete(
+      `https://api.zoom.us/v2/meetings/${zoomMeetingUuidPath(item.uuid)}/recordings`,
+      { headers: { Authorization: `Bearer ${zoomToken}` }, params: { action: "trash" } },
+    )));
+    const now = new Date().toISOString();
+    const db = await readLiveDb();
+    db.zoomFragmentTrashLog = [...(Array.isArray(db.zoomFragmentTrashLog) ? db.zoomFragmentTrashLog : [])];
+    const trashed = [];
+    const failed = [];
+    results.forEach((result, index) => {
+      const item = eligible[index];
+      if (result.status === "fulfilled") {
+        db.zoomFragmentTrashLog.push({ ...item, trashed_at: now, trashed_by: user.id });
+        trashed.push(item.recording_key);
+      } else {
+        failed.push({ recording_key: item.recording_key, error: result.reason?.response?.data?.message || result.reason?.message || "Zoom delete failed" });
+      }
+    });
+    await writeLiveDb(db);
+    res.json({ success: true, trashed, failed, refused });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
   }
