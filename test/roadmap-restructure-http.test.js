@@ -100,7 +100,7 @@ test("roadmap restructure relabels taught days, merges future days and removes s
   const courseId = "course-roadmap-restructure";
   const password = "RoadmapAdmin9!";
   const now = new Date().toISOString();
-  let offset = -6;
+  let offset = -22;
   const mk = (id, system, systemDay, pages, extra = {}) => {
     const day = teachingDay({ id, courseId, date: dateKey(offset++), system, systemDay, title: `${system} — Day ${systemDay} — FA 2026 pp. ${pages}`, pages: `FA 2026 pp. ${pages}`, sessionId: `s-${id}` });
     const qids = [`${id}-q1`, `${id}-q2`];
@@ -111,6 +111,8 @@ test("roadmap restructure relabels taught days, merges future days and removes s
     }, extra);
     return day;
   };
+  // System days are numbered by position, so the fixture needs the earlier CNS days that the live roadmap has.
+  const cnsEarly = Array.from({ length: 18 }, (_, i) => mk(`cns${i + 1}`, "Central Nervous System", i + 1, `${512 + i * 3}–${514 + i * 3}`));
   const cns19 = mk("cns19", "Central Nervous System", 19, "566–568");
   const rep1 = mk("rep1", "Reproductive", 1, "629–632");
   const rep2 = mk("rep2", "Reproductive", 2, "633–636");
@@ -121,7 +123,7 @@ test("roadmap restructure relabels taught days, merges future days and removes s
   const imm = Array.from({ length: 7 }, (_, i) => mk(`imm${i + 1}`, "Immunology", i + 1, `${93 + i * 4}–${96 + i * 4}`));
   const hem = Array.from({ length: 11 }, (_, i) => mk(`hem${i + 1}`, "Hematology", i + 1, `${409 + i * 4}–${412 + i * 4}`));
   const psych1 = mk("psych1", "Psychiatry", 1, "569–572");
-  const days = [cns19, rep1, rep2, rep3, rep4, rep5, ...imm, ...hem, psych1];
+  const days = [...cnsEarly, cns19, rep1, rep2, rep3, rep4, rep5, ...imm, ...hem, psych1];
   days.forEach((day, index) => { day.order = index + 1; day.day_number = index + 1; day.instructional_day_number = index + 1; day.schedule_slot_number = index + 1; });
   const sessions = Object.fromEntries(days.map((day) => [day.live_session_id, {
     id: day.live_session_id, course_id: courseId, roadmap_day_id: day.id, scheduled_date: day.date, scheduled_time: "13:00",
@@ -201,6 +203,7 @@ test("roadmap restructure relabels taught days, merges future days and removes s
     const road = after.roadmaps[courseId].days;
     const byId = Object.fromEntries(road.map((day) => [day.id, day]));
     const label = (id) => `${byId[id].system}:${byId[id].system_day}`;
+    assert.equal(label("cns19"), "Central Nervous System:19");
     assert.equal(label("rep1"), "Central Nervous System:20");
     assert.equal(label("rep2"), "Immunology:1");
     assert.equal(label("rep3"), "Immunology:2");
