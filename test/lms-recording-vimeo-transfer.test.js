@@ -88,3 +88,13 @@ test("an admin may accept a complete copy of a paused recording, but not an empt
   assert.equal(reviewedCopyAcceptable({ ...done, vimeo_duration_seconds: 4000 }, { zoom_duration_seconds: 3720 }), false, "longer than Zoom");
   assert.equal(reviewedCopyAcceptable({ vimeo_status: "transcoding", vimeo_transcode_status: "in_progress", vimeo_duration_seconds: 3000 }, { zoom_duration_seconds: 3720 }), false, "still processing");
 });
+
+test("only unpublished short fragments or empty recordings can skip the Vimeo copy", async () => {
+  const { zoomFragmentReason } = await import("../lib/lms-recording-vimeo-transfer.js");
+  const file = (minutes) => ({ recording_start: "2026-07-14T16:56:00Z", recording_end: new Date(Date.parse("2026-07-14T16:56:00Z") + minutes * 60000).toISOString() });
+  assert.equal(zoomFragmentReason({ videoFile: file(22) }), "short_fragment");
+  assert.equal(zoomFragmentReason({ videoFile: null }), "no_video_file");
+  assert.equal(zoomFragmentReason({ videoFile: file(60) }), "", "a full-length class is never a fragment");
+  assert.equal(zoomFragmentReason({ videoFile: file(22), recording: { published: true } }), "", "published recordings are never fragments");
+  assert.equal(zoomFragmentReason({ videoFile: file(55), recording: { published: true }, transfer: { vimeo_status: "available", vimeo_duration_seconds: 2 } }), "empty_recording");
+});
