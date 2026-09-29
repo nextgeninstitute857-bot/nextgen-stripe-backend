@@ -692,6 +692,9 @@ import {
   attachVimeoToRecording,
   vimeoPlayerUrl,
   checkVimeoTransfer,
+  RUNAWAY_RECORDING_SECONDS,
+  selectAutoTransferCandidates,
+  selectAutoZoomTrashCandidates,
   reviewedCopyAcceptable,
   startVimeoPullFromZoom,
   transferState,
@@ -98701,6 +98704,177 @@ function ngStartZoomRecordingRecoveryScheduler() {
   return ngZoomRecordingRecoveryTimer;
 }
 
+// Automatic Zoom -> Vimeo for class recordings. Runs on its own timer after the
+// existing recording auto-publish flow: it only picks recordings that flow has
+// already published, copies them to Vimeo, switches playback to Vimeo once the
+// copy is verified, and (only when enabled) moves old Zoom files to the trash.
+const NEXTGEN_AUTO_VIMEO_TRANSFER_ENABLED = String(process.env.NEXTGEN_AUTO_VIMEO_TRANSFER_ENABLED || "true").toLowerCase() !== "false";
+const NEXTGEN_AUTO_VIMEO_TRANSFER_INTERVAL_MS = Math.max(60_000, Number(process.env.NEXTGEN_AUTO_VIMEO_TRANSFER_INTERVAL_MS || 10 * 60 * 1000) || 10 * 60 * 1000);
+const NEXTGEN_AUTO_ZOOM_TRASH_ENABLED = String(process.env.NEXTGEN_AUTO_ZOOM_TRASH_ENABLED || "false").toLowerCase() === "true";
+const NEXTGEN_AUTO_ZOOM_TRASH_MIN_AGE_DAYS = Math.max(1, Number(process.env.NEXTGEN_AUTO_ZOOM_TRASH_MIN_AGE_DAYS || 7) || 7);
+let ngAutoVimeoTransferTimer = null;
+const ngAutoVimeoTransferState = {
+  build: LMS_RECORDING_VIMEO_TRANSFER_BUILD,
+  enabled: NEXTGEN_AUTO_VIMEO_TRANSFER_ENABLED,
+  zoom_trash_enabled: NEXTGEN_AUTO_ZOOM_TRASH_ENABLED,
+  running: false,
+  last_started_at: null,
+  last_finished_at: null,
+  last_error: null,
+  last_result: null,
+};
+
+async function ngRunAutoVimeoTransferTick(reason = "interval") {
+  if (!NEXTGEN_AUTO_VIMEO_TRANSFER_ENABLED) return { success: true, skipped: true, reason: "disabled" };
+  if (ngAutoVimeoTransferState.running) return { success: true, skipped: true, reason: "already_running" };
+  if (!String(process.env.VIMEO_ACCESS_TOKEN || process.env.VIMEO_TOKEN || "").trim() || !process.env.ZOOM_CLIENT_ID) {
+    return { success: true, skipped: true, reason: "not_configured" };
+  }
+  ngAutoVimeoTransferState.running = true;
+  ngAutoVimeoTransferState.last_started_at = new Date().toISOString();
+  const result = { success: true, reason, started: [], verified: [], trashed: [], errors: [] };
+  try {
+    const snapshot = await readLiveDb();
+    const vimeoApi = ngLmsVimeoApi();
+    const candidates = selectAutoTransferCandidates(snapshot);
+    const pending = Object.entries(snapshot.recordingVimeoTransfers || {})
+      .filter(([, transfer]) => transfer.vimeo_video_id && transfer.verified !== true && !transfer.error);
+    const trashCandidates = NEXTGEN_AUTO_ZOOM_TRASH_ENABLED
+      ? selectAutoZoomTrashCandidates(snapshot, { minAgeDays: NEXTGEN_AUTO_ZOOM_TRASH_MIN_AGE_DAYS })
+      : [];
+    if (!candidates.length && !pending.length && !trashCandidates.length) {
+      ngAutoVimeoTransferState.last_result = { ...result, idle: true };
+      return ngAutoVimeoTransferState.last_result;
+    }
+    const zoomToken = candidates.length || trashCandidates.length ? await getZoomAccessToken() : null;
+
+    const startedRows = [];
+    for (const item of candidates) {
+      try {
+        const saved = snapshot.recordings?.[item.recording_key] || {};
+        const meeting = await ngFetchZoomMeetingRecordingFiles(item.uuid, zoomToken);
+        const videoFile = findVideoFile(meeting.recording_files || []);
+        const name = `${saved.topic || meeting.topic || "NextGen live class"} (${String(meeting.start_time || "").slice(0, 10)})`;
+        const vimeo = await startVimeoPullFromZoom({ vimeoApi, zoomAccessToken: zoomToken, videoFile, name, description: "NextGen USMLE live class recording." });
+        let embedDomainsError = null;
+        try {
+          await ensureVimeoEmbedDomains({ videoIds: [vimeo.vimeo_video_id], domains: LMS_RECORDING_EMBED_DOMAINS });
+        } catch (error) {
+          embedDomainsError = error.message;
+        }
+        const zoomSeconds = zoomFileDurationSeconds(videoFile);
+        startedRows.push({
+          recording_key: item.recording_key, uuid: item.uuid, meeting_id: String(meeting.id || ""), start_time: meeting.start_time || null, name,
+          zoom_file_id: videoFile.id, zoom_file_size: Number(videoFile.file_size || 0), zoom_duration_seconds: zoomSeconds,
+          needs_trim: Boolean(zoomSeconds && zoomSeconds > RUNAWAY_RECORDING_SECONDS),
+          ...vimeo, embed_domains_error: embedDomainsError,
+        });
+      } catch (error) {
+        result.errors.push({ recording_key: item.recording_key, step: "start", error: error.response?.data?.error || error.message });
+      }
+    }
+
+    const checks = [];
+    for (const [key, transfer] of pending) {
+      try {
+        checks.push([key, await checkVimeoTransfer({ vimeoApi, transfer })]);
+      } catch (error) {
+        result.errors.push({ recording_key: key, step: "verify", error: error.message });
+      }
+    }
+
+    const trashedKeys = [];
+    for (const item of trashCandidates) {
+      try {
+        await axios.delete(`https://api.zoom.us/v2/meetings/${zoomMeetingUuidPath(item.uuid)}/recordings`, {
+          headers: { Authorization: `Bearer ${zoomToken}` }, params: { action: "trash" },
+        });
+        trashedKeys.push(item.recording_key);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      } catch (error) {
+        result.errors.push({ recording_key: item.recording_key, step: "zoom_trash", error: error.response?.data?.message || error.message });
+      }
+    }
+
+    const now = new Date().toISOString();
+    const db = await readLiveDb();
+    db.recordingVimeoTransfers = { ...(db.recordingVimeoTransfers || {}) };
+    for (const row of startedRows) {
+      if (db.recordingVimeoTransfers[row.recording_key]) continue;
+      db.recordingVimeoTransfers[row.recording_key] = { ...row, started_at: now, started_by: "auto_vimeo_transfer", verified: false, error: null };
+      result.started.push(row.recording_key);
+    }
+    for (const [key, check] of checks) {
+      const current = db.recordingVimeoTransfers[key];
+      if (!current) continue;
+      const next = { ...current, ...check, checked_at: now };
+      if (!check.verified && reviewedCopyAcceptable(check, current)) {
+        next.verified = true;
+        next.verification = "auto_paused_recording";
+      }
+      if (next.verified) {
+        next.verified_at = now;
+        next.attached_to_recording = attachVimeoToRecording(db, key, next, now);
+        result.verified.push(key);
+      }
+      db.recordingVimeoTransfers[key] = next;
+    }
+    for (const key of trashedKeys) {
+      db.recordingVimeoTransfers[key] = { ...db.recordingVimeoTransfers[key], zoom_trashed_at: now, zoom_trashed_by: "auto_vimeo_transfer" };
+      result.trashed.push(key);
+    }
+    if (result.started.length || checks.length || result.trashed.length) await writeLiveDb(db);
+    ngAutoVimeoTransferState.last_error = result.errors.length ? result.errors[0].error : null;
+    ngAutoVimeoTransferState.last_result = result;
+    return result;
+  } catch (error) {
+    ngAutoVimeoTransferState.last_error = error.message;
+    ngAutoVimeoTransferState.last_result = { success: false, reason, error: error.message };
+    return ngAutoVimeoTransferState.last_result;
+  } finally {
+    ngAutoVimeoTransferState.running = false;
+    ngAutoVimeoTransferState.last_finished_at = new Date().toISOString();
+  }
+}
+
+function ngStartAutoVimeoTransferScheduler() {
+  if (!NEXTGEN_AUTO_VIMEO_TRANSFER_ENABLED || ngAutoVimeoTransferTimer) return ngAutoVimeoTransferTimer;
+  ngAutoVimeoTransferTimer = setInterval(() => {
+    ngRunAutoVimeoTransferTick("interval").catch((error) => console.error("Auto Vimeo transfer failed:", error.message));
+  }, NEXTGEN_AUTO_VIMEO_TRANSFER_INTERVAL_MS);
+  if (typeof ngAutoVimeoTransferTimer.unref === "function") ngAutoVimeoTransferTimer.unref();
+  return ngAutoVimeoTransferTimer;
+}
+
+app.get("/admin/recordings/vimeo-automation-status", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.recordings.manage");
+    const db = await readLiveDb();
+    const transfers = Object.values(db.recordingVimeoTransfers || {});
+    res.json({
+      success: true,
+      ...ngAutoVimeoTransferState,
+      interval_ms: NEXTGEN_AUTO_VIMEO_TRANSFER_INTERVAL_MS,
+      zoom_trash_min_age_days: NEXTGEN_AUTO_ZOOM_TRASH_MIN_AGE_DAYS,
+      waiting_for_transfer: selectAutoTransferCandidates(db, { limit: 100 }).length,
+      transferring: transfers.filter((transfer) => transfer.vimeo_video_id && transfer.verified !== true && !transfer.error).length,
+      verified: transfers.filter((transfer) => transfer.verified === true).length,
+      needs_trim: transfers.filter((transfer) => transfer.needs_trim === true).map((transfer) => ({ recording_key: transfer.recording_key, vimeo_link: transfer.vimeo_link })),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/recordings/vimeo-automation-run-now", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.recordings.manage");
+    res.json(await ngRunAutoVimeoTransferTick("manual_admin_run"));
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.get("/admin/recordings/automation-status", async (req, res) => {
   try {
     await requireLmsPermission(req, "lms.recordings.manage");
@@ -100395,6 +100569,7 @@ async function startNextgenServer() {
   ngStartAssessmentGeneratorScheduler();
   ngStartWeakFlashcardAutomationScheduler();
   ngStartZoomRecordingRecoveryScheduler();
+  ngStartAutoVimeoTransferScheduler();
   ngStartContentOperationsScheduler();
   ngStartAylaVimeoFolderSyncScheduler();
   ngStartAylaVimeoPlaybackReconciliationScheduler();
