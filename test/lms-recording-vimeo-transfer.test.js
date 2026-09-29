@@ -78,3 +78,13 @@ test("transfer states and attaching a verified copy keep the Zoom link for refer
   assert.equal(db.notes.s1.recording_url, "https://vimeo.com/9/h");
   assert.equal(attachVimeoToRecording(db, "missing", transfer), false);
 });
+
+test("an admin may accept a complete copy of a paused recording, but not an empty or oversized one", async () => {
+  const { reviewedCopyAcceptable } = await import("../lib/lms-recording-vimeo-transfer.js");
+  const done = { vimeo_status: "available", vimeo_transcode_status: "complete", error: null };
+  assert.equal(reviewedCopyAcceptable({ ...done, vimeo_duration_seconds: 3000 }, { zoom_duration_seconds: 3720 }), true, "12 minutes of pauses");
+  assert.equal(reviewedCopyAcceptable({ ...done, vimeo_duration_seconds: 5 }, { zoom_duration_seconds: 4600 }), false, "near-empty file");
+  assert.equal(reviewedCopyAcceptable({ ...done, vimeo_duration_seconds: 1500 }, { zoom_duration_seconds: 3720 }), false, "less than half");
+  assert.equal(reviewedCopyAcceptable({ ...done, vimeo_duration_seconds: 4000 }, { zoom_duration_seconds: 3720 }), false, "longer than Zoom");
+  assert.equal(reviewedCopyAcceptable({ vimeo_status: "transcoding", vimeo_transcode_status: "in_progress", vimeo_duration_seconds: 3000 }, { zoom_duration_seconds: 3720 }), false, "still processing");
+});
