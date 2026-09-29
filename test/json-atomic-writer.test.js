@@ -54,3 +54,14 @@ test("event loop delay stats are reported", () => {
   const stats = eventLoopDelayStats();
   for (const key of ["p50_ms", "p99_ms", "max_ms", "mean_ms", "window_seconds"]) assert.equal(typeof stats[key], "number");
 });
+
+test("database saves are attributed to the calling function", async () => {
+  const { rememberWriteSource, jsonWriteSources } = await import("../lib/json-atomic-writer.js");
+  function writeCrmDb() { rememberWriteSource("test-db"); }
+  function frequentTick() { writeCrmDb(); }
+  frequentTick();
+  frequentTick();
+  const [top] = jsonWriteSources()["test-db"];
+  assert.match(top.source, /^frequentTick:\d+$/);
+  assert.equal(top.count, 2);
+});
