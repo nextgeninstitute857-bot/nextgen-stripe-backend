@@ -16555,6 +16555,7 @@ app.post("/zoom/webhook", async (req, res) => {
 
 app.get("/zoom/recordings", async (req, res) => {
   try {
+    await requireLmsPermission(req, "lms.recordings.view");
     const token = await getZoomAccessToken();
     const requestedTo = String(req.query.to || "").trim();
     const requestedFrom = String(req.query.from || "").trim();
@@ -16656,7 +16657,7 @@ app.get("/zoom/recordings", async (req, res) => {
       recordings,
     });
   } catch (e) {
-    res.status(500).json({ success: false, error: e.response?.data || e.message });
+    res.status(e.statusCode || 500).json({ success: false, error: e.response?.data || e.message });
   }
 });
 
