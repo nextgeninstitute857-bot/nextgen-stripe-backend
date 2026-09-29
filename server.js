@@ -98984,6 +98984,57 @@ app.post("/admin/recordings/attach-vimeo", async (req, res) => {
   }
 });
 
+const LECTURES_LIBRARY_EMBED_DOMAINS = ["lectureslibrary.online", "www.lectureslibrary.online"];
+
+// Makes a separate Vimeo copy of a Zoom class recording for lectureslibrary.online.
+// It is never attached to the LMS, so deleting or re-linking it on the library
+// site (which deletes the old Vimeo video) cannot break LMS playback.
+app.post("/admin/recordings/vimeo-library-copy", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.recordings.manage");
+    const items = (Array.isArray(req.body.items) ? req.body.items : [])
+      .map((item) => ({ recording_key: String(item?.recording_key || "").trim(), uuid: String(item?.uuid || "").trim(), name: String(item?.name || "").trim().slice(0, 250) }))
+      .filter((item) => item.recording_key && item.uuid && item.name);
+    if (!items.length) return res.status(400).json({ success: false, error: "items [{ recording_key, uuid, name }] are required" });
+    if (items.length > 30) return res.status(400).json({ success: false, error: "Copy at most 30 recordings per request" });
+    const snapshot = await readLiveDb();
+    const existing = snapshot.recordingVimeoLibraryCopies || {};
+    const toStart = items.filter((item) => !existing[item.recording_key]?.vimeo_video_id || req.body.force === true);
+    const skipped = items.filter((item) => !toStart.includes(item)).map((item) => ({ recording_key: item.recording_key, vimeo_video_id: existing[item.recording_key].vimeo_video_id }));
+    if (req.body.dry_run !== false) return res.json({ success: true, dry_run: true, would_start: toStart, skipped });
+
+    const zoomToken = await getZoomAccessToken();
+    const vimeoApi = ngLmsVimeoApi();
+    const results = [];
+    for (const item of toStart) {
+      try {
+        const meeting = await ngFetchZoomMeetingRecordingFiles(item.uuid, zoomToken);
+        const videoFile = findVideoFile(meeting.recording_files || []);
+        const vimeo = await startVimeoPullFromZoom({ vimeoApi, zoomAccessToken: zoomToken, videoFile, name: item.name, description: "NextGen USMLE Step 1 First Aid lecture." });
+        let embedDomainsError = null;
+        try {
+          await ensureVimeoEmbedDomains({ videoIds: [vimeo.vimeo_video_id], domains: LECTURES_LIBRARY_EMBED_DOMAINS });
+        } catch (error) {
+          embedDomainsError = error.message;
+        }
+        results.push({ ...item, ok: true, ...vimeo, zoom_file_size: Number(videoFile.file_size || 0), embed_domains_error: embedDomainsError });
+      } catch (error) {
+        results.push({ ...item, ok: false, error: error.response?.data?.error || error.message });
+      }
+    }
+    const now = new Date().toISOString();
+    const db = await readLiveDb();
+    db.recordingVimeoLibraryCopies = { ...(db.recordingVimeoLibraryCopies || {}) };
+    for (const result of results.filter((row) => row.ok)) {
+      db.recordingVimeoLibraryCopies[result.recording_key] = { ...result, target: "lectureslibrary.online", created_at: now, created_by: user.id };
+    }
+    await writeLiveDb(db);
+    res.json({ success: true, dry_run: false, results, skipped });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
+  }
+});
+
 app.post("/admin/recordings/automation-run-now", async (req, res) => {
   try {
     await requireLmsPermission(req, "lms.recordings.manage");
