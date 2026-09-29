@@ -694,6 +694,7 @@ import {
   reviewedCopyAcceptable,
   startVimeoPullFromZoom,
   transferState,
+  vttSpeechBounds,
   zoomFileDurationSeconds,
   zoomFragmentReason,
   zoomMeetingUuidPath,
@@ -98916,6 +98917,30 @@ app.post("/admin/recordings/zoom-trash-fragments", async (req, res) => {
     });
     await writeLiveDb(db);
     res.json({ success: true, trashed, failed, refused });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
+  }
+});
+
+// Read-only: the Zoom transcript of one exact recording (by meeting UUID), with where speech starts and ends.
+app.get("/admin/recordings/zoom-transcript", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.recordings.manage");
+    const uuid = String(req.query.uuid || "").trim();
+    if (!uuid) return res.status(400).json({ success: false, error: "uuid is required" });
+    const zoomToken = await getZoomAccessToken();
+    const meeting = await ngFetchZoomMeetingRecordingFiles(uuid, zoomToken);
+    const transcriptFile = findTranscriptFile(meeting.recording_files || []);
+    if (!transcriptFile) return res.json({ success: true, uuid, transcript_found: false });
+    const vtt = await downloadZoomTextFile(transcriptFile, zoomToken);
+    res.json({
+      success: true,
+      uuid,
+      transcript_found: true,
+      start_time: meeting.start_time || null,
+      ...vttSpeechBounds(vtt),
+      transcript_text: stripVttToText(vtt),
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.response?.data || error.message });
   }
