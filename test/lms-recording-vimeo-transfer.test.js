@@ -98,3 +98,10 @@ test("only unpublished short fragments or empty recordings can skip the Vimeo co
   assert.equal(zoomFragmentReason({ videoFile: file(22), recording: { published: true } }), "", "published recordings are never fragments");
   assert.equal(zoomFragmentReason({ videoFile: file(55), recording: { published: true }, transfer: { vimeo_status: "available", vimeo_duration_seconds: 2 } }), "empty_recording");
 });
+
+test("speech bounds come from the first and last WebVTT cues", async () => {
+  const { vttSpeechBounds } = await import("../lib/lms-recording-vimeo-transfer.js");
+  const vtt = "WEBVTT\n\n1\n00:00:05.200 --> 00:00:09.000\nHello\n\n2\n01:12:30.000 --> 01:12:41.400\nSee you tomorrow\n";
+  assert.deepEqual(vttSpeechBounds(vtt), { cues: 2, first_cue_start_seconds: 5, last_cue_end_seconds: 4362 });
+  assert.equal(vttSpeechBounds("").last_cue_end_seconds, null);
+});
