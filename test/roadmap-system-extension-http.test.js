@@ -193,6 +193,19 @@ test("system-aware roadmap extension recovers reached adjacent days and preserve
         updated_at: now,
       },
     },
+    roadmapMasterMaps: {
+      nextgen_120_day_usmle_step_1_marathon: {
+        id: "nextgen_120_day_usmle_step_1_marathon",
+        template: "nextgen_120_day_usmle_step_1_marathon",
+        rows: Array.from({ length: 8 }, (_, index) => ({
+          system: "Hematology",
+          system_day: index + 1,
+          topic: `Hematology mapped packet ${index + 1}`,
+          first_aid_pages: `${600 + index}-${603 + index}`,
+          uworld_qids: [`${9000 + index}`],
+        })),
+      },
+    },
     liveSessions: {
       "session-reached-1": {
         id: "session-reached-1", course_id: courseId, roadmap_day_id: msk1.id,
@@ -203,7 +216,7 @@ test("system-aware roadmap extension recovers reached adjacent days and preserve
       "session-current-2": {
         id: "session-current-2", course_id: courseId, roadmap_day_id: msk2.id,
         scheduled_date: msk2.date, scheduled_time: "13:00", title: msk2.title, topic: msk2.title,
-        system: "MSK", system_day: 2, day_number: 14, status: "scheduled",
+        system: "MSK", system_day: 2, day_number: 14, status: "in_progress",
         created_at: now, updated_at: now,
       },
       "session-future-3": {
@@ -375,6 +388,7 @@ test("system-aware roadmap extension recovers reached adjacent days and preserve
     assert.equal(saved.liveSessions["session-reached-1"].system_day, 13);
     assert.match(saved.liveSessions["session-reached-1"].title, /Cardiology.*Day 13/i);
     assert.equal(saved.liveSessions["session-current-2"].roadmap_day_id, msk2.id);
+    assert.equal(saved.liveSessions["session-current-2"].status, "in_progress");
     assert.equal(saved.liveSessions["session-current-2"].system_day, 14);
 
     const systemsFromThirteen = savedRoadmap.days
@@ -418,6 +432,129 @@ test("system-aware roadmap extension recovers reached adjacent days and preserve
     assert.equal(saved.sentinel, "roadmap-extension-sentinel");
     assert.equal(await fs.readFile(crmPath, "utf8"), crmOriginal);
     assert.equal(await fs.readFile(aylaPath, "utf8"), aylaOriginal);
+
+    const beforeShuffleText = await fs.readFile(livePath, "utf8");
+    const beforeShuffle = JSON.parse(beforeShuffleText);
+    const beforeShuffleRoadmap = beforeShuffle.roadmaps[courseId];
+    const firstMovable = applied.payload.inserted_days.find((day) => Number(day.system_day) === 15);
+    assert.ok(firstMovable, "The first new Cardiology day should be available as the shuffle boundary");
+    const firstMovableIndex = beforeShuffleRoadmap.days.findIndex((day) => day.id === firstMovable.id);
+    const suffixIds = beforeShuffleRoadmap.days.slice(firstMovableIndex).map((day) => day.id);
+    const reorderedIds = [...suffixIds].reverse();
+    const fixedSessionDates = {
+      [msk1.id]: beforeShuffleRoadmap.days.find((day) => day.id === msk1.id).date,
+      [msk2.id]: beforeShuffleRoadmap.days.find((day) => day.id === msk2.id).date,
+    };
+    const systemChanges = { [msk1.id]: "Immunology", [msk2.id]: "Immunology" };
+
+    const unsafeShuffle = await api(baseUrl, "/admin/roadmap/resequence", {
+      method: "POST",
+      token,
+      body: {
+        course_id: courseId,
+        first_movable_day_id: msk1.id,
+        ordered_day_ids: [msk2.id, msk1.id, ...beforeShuffleRoadmap.days.slice(beforeShuffleRoadmap.days.findIndex((day) => day.id === msk2.id) + 1)
+          .filter((day) => ![msk1.id, msk2.id].includes(day.id) && !["holiday", "cancelled", "canceled"].includes(String(day.status || "").toLowerCase()))
+          .map((day) => day.id)],
+        dry_run: true,
+      },
+    });
+    assert.equal(unsafeShuffle.response.status, 409, JSON.stringify(unsafeShuffle.payload));
+    assert.match(unsafeShuffle.payload.error, /safety stop/i);
+    assert.equal(await fs.readFile(livePath, "utf8"), beforeShuffleText, "unsafe shuffle preview must not alter the LMS database");
+
+    const shuffleRequest = {
+      course_id: courseId,
+      first_movable_day_id: firstMovable.id,
+      ordered_day_ids: reorderedIds,
+      system_changes: systemChanges,
+      dry_run: true,
+    };
+    const shufflePreview = await api(baseUrl, "/admin/roadmap/resequence", {
+      method: "POST",
+      token,
+      body: shuffleRequest,
+    });
+    assert.equal(shufflePreview.response.status, 200, JSON.stringify(shufflePreview.payload));
+    assert.equal(shufflePreview.payload.dry_run, true);
+    assert.equal(shufflePreview.payload.applied, false);
+    assert.ok(shufflePreview.payload.changed_days.length > 0);
+    assert.equal(shufflePreview.payload.assessments_created, 0);
+    assert.equal(await fs.readFile(livePath, "utf8"), beforeShuffleText, "shuffle preview must not write the LMS database");
+
+    const shuffled = await api(baseUrl, "/admin/roadmap/resequence", {
+      method: "POST",
+      token,
+      body: {
+        ...shuffleRequest,
+        dry_run: false,
+        confirm: "RESEQUENCE_ROADMAP",
+        expected_roadmap_updated_at: shufflePreview.payload.roadmap_updated_at,
+      },
+    });
+    assert.equal(shuffled.response.status, 200, JSON.stringify(shuffled.payload));
+    assert.equal(shuffled.payload.applied, true);
+    assert.equal(shuffled.payload.assessments_created, 0);
+    assert.equal(shuffled.payload.preserved_existing_roadmap_days, beforeShuffleRoadmap.days.length);
+    assert.equal(shuffled.payload.preserved_existing_live_sessions, Object.keys(beforeShuffle.liveSessions).length);
+
+    const afterShuffle = JSON.parse(await fs.readFile(livePath, "utf8"));
+    const afterShuffleRoadmap = afterShuffle.roadmaps[courseId];
+    assert.deepEqual(afterShuffleRoadmap.days.slice(firstMovableIndex).map((day) => day.id), reorderedIds);
+    for (const dayId of Object.keys(fixedSessionDates)) {
+      const day = afterShuffleRoadmap.days.find((item) => item.id === dayId);
+      assert.equal(day.date, fixedSessionDates[dayId], `${dayId} keeps its original date`);
+    }
+    assert.equal(afterShuffleRoadmap.days.find((day) => day.id === msk1.id).system, "Immunology");
+    assert.equal(afterShuffleRoadmap.days.find((day) => day.id === msk2.id).system, "Immunology");
+    assert.equal(afterShuffle.liveSessions["session-reached-1"].status, "completed");
+    assert.equal(afterShuffle.liveSessions["session-current-2"].status, "in_progress");
+    assert.equal(afterShuffle.liveSessions["session-reached-1"].roadmap_day_id, msk1.id);
+    assert.equal(afterShuffle.liveSessions["session-reached-1"].system, "Immunology");
+    assert.equal(afterShuffle.recordings["recording-reached"].session_id, "session-reached-1");
+    assert.equal(afterShuffle.recordings["recording-reached"].roadmap_day_id, msk1.id);
+    assert.equal(afterShuffle.notes["note-reached"].session_id, "session-reached-1");
+    assert.equal(afterShuffle.attendance["attendance-reached"].session_id, "session-reached-1");
+    assert.deepEqual(Object.keys(afterShuffle.assessments).sort(), Object.keys(beforeShuffle.assessments).sort());
+    assert.equal(afterShuffle.assessments["future-msk-assessment"].roadmap_day_id, msk3.id);
+
+    const assessmentIdsBeforeNewSystem = Object.keys(afterShuffle.assessments).sort();
+    const beforeNewSystemText = await fs.readFile(livePath, "utf8");
+    const addHematologyRequest = {
+      course_id: courseId,
+      system: "Hematology",
+      count: 2,
+      use_master_map: true,
+      quick_add: false,
+    };
+    const newSystemPreview = await api(baseUrl, "/admin/roadmap/extend-system", {
+      method: "POST",
+      token,
+      body: { ...addHematologyRequest, dry_run: true },
+    });
+    assert.equal(newSystemPreview.response.status, 200, JSON.stringify(newSystemPreview.payload));
+    assert.deepEqual(newSystemPreview.payload.inserted_days.map((day) => day.system_day), [1, 2]);
+    assert.ok(newSystemPreview.payload.inserted_days.every((day) => day.system === "Hematology" && day.assessment_day === false));
+    assert.equal(await fs.readFile(livePath, "utf8"), beforeNewSystemText, "new-system preview remains read-only");
+
+    const newSystemApplied = await api(baseUrl, "/admin/roadmap/extend-system", {
+      method: "POST",
+      token,
+      body: {
+        ...addHematologyRequest,
+        dry_run: false,
+        confirm: "EXTEND_SYSTEM_ROADMAP",
+        expected_roadmap_updated_at: newSystemPreview.payload.roadmap_updated_at,
+      },
+    });
+    assert.equal(newSystemApplied.response.status, 200, JSON.stringify(newSystemApplied.payload));
+    assert.equal(newSystemApplied.payload.assessments_created, 0);
+    const afterNewSystem = JSON.parse(await fs.readFile(livePath, "utf8"));
+    assert.deepEqual(Object.keys(afterNewSystem.assessments).sort(), assessmentIdsBeforeNewSystem);
+    assert.equal(afterNewSystem.roadmaps[courseId].days.filter((day) => day.source === "admin_system_extension" && day.system === "Hematology").length, 2);
+    assert.ok(afterNewSystem.roadmaps[courseId].days
+      .filter((day) => day.source === "admin_system_extension" && day.system === "Hematology")
+      .every((day) => day.assessment_day === false && !day.assessment_id && !day.weekly_assessment_id && !day.grand_assessment_id));
   } finally {
     if (child.exitCode === null) {
       await new Promise((resolve) => {
