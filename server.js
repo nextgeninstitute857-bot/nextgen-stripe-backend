@@ -691,6 +691,7 @@ import {
   LMS_RECORDING_VIMEO_TRANSFER_BUILD,
   attachVimeoToRecording,
   checkVimeoTransfer,
+  reviewedCopyAcceptable,
   startVimeoPullFromZoom,
   transferState,
   zoomFileDurationSeconds,
@@ -98779,7 +98780,8 @@ app.post("/admin/recordings/vimeo-transfer", async (req, res) => {
 // Checks Vimeo processing; verified copies become the LMS playback source.
 app.post("/admin/recordings/vimeo-transfer/refresh", async (req, res) => {
   try {
-    await requireLmsPermission(req, "lms.recordings.manage");
+    const { user } = await requireLmsPermission(req, "lms.recordings.manage");
+    const acceptReviewedKeys = new Set((Array.isArray(req.body.accept_reviewed_keys) ? req.body.accept_reviewed_keys : []).map((key) => String(key || "").trim()));
     const snapshot = await readLiveDb();
     const pending = Object.entries(snapshot.recordingVimeoTransfers || {})
       .filter(([, transfer]) => transfer.vimeo_video_id && transfer.verified !== true);
@@ -98799,7 +98801,12 @@ app.post("/admin/recordings/vimeo-transfer/refresh", async (req, res) => {
         return;
       }
       const next = { ...current, ...check.value, checked_at: now };
-      if (check.value.verified) {
+      if (!check.value.verified && acceptReviewedKeys.has(key) && reviewedCopyAcceptable(check.value, current)) {
+        next.verified = true;
+        next.verification = "admin_reviewed_paused_recording";
+        next.reviewed_by = user.id;
+      }
+      if (next.verified) {
         next.verified_at = now;
         next.attached_to_recording = attachVimeoToRecording(db, key, next, now);
         summary.verified.push({ recording_key: key, vimeo_link: next.vimeo_link, attached_to_recording: next.attached_to_recording });
