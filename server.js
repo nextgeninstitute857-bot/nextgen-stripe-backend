@@ -87142,10 +87142,7 @@ function aylaV189BaselineFromVerifiedHistory(db, student, system) {
     return { percent: Math.round((correct / questionRows.length) * 100), source: "first_verified_question_block", recordedAt: questionRows[questionRows.length - 1]?.createdAt || null };
   }
 
-  const global = aylaNumber(student.currentScore ?? student.current_score, 0);
-  if (global > 0 && global <= 100) {
-    return { percent: Math.round(global), source: "diagnostic_global_score", recordedAt: student.baselineRecordedAt || student.createdAt || null };
-  }
+  // No per-system fallback to the overall diagnostic score (see aylaV189SystemProgress).
   return null;
 }
 
@@ -87229,7 +87226,6 @@ function aylaV189SystemProgress(db, student) {
     .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)));
   const assignmentsBySystem = bySystem(aylaValues(db, "aylaResourceAssignments")
     .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)));
-  const globalBaseline = aylaNumber(student.currentScore ?? student.current_score, 0);
 
   return aylaV227SystemsForStudent(student).map((system) => {
     const key = aylaV189SystemKey(system);
@@ -87260,13 +87256,9 @@ function aylaV189SystemProgress(db, student) {
         recordedAt: firstBlock[firstBlock.length - 1]?.createdAt || null,
       };
     }
-    if (!baseline && globalBaseline > 0 && globalBaseline <= 100) {
-      baseline = {
-        percent: Math.round(globalBaseline),
-        source: "diagnostic_global_score",
-        recordedAt: student.baselineRecordedAt || student.createdAt || null,
-      };
-    }
+    // The single overall diagnostic score is not a per-system baseline; copying it to
+    // every system produced made-up "improving/declining" trends. Until the system has
+    // its own diagnostic, assessment or first question block, it stays "baseline needed".
 
     const signals = [];
     questionRows.slice()

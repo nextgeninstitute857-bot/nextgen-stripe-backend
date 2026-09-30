@@ -5,6 +5,8 @@ import {
   aylaOriginalOverdueAssignment,
   aylaOverdueBaseTitle,
   aylaOverdueTitle,
+  aylaCatchUpCutoffDate,
+  aylaExpiredCatchUpAssignments,
 } from "../lib/aylamed-overdue.js";
 
 test("overdue title remains single-prefixed for current and legacy records", () => {
@@ -42,4 +44,20 @@ test("only original unfinished assignments are eligible for carry-forward", () =
     }),
     false,
   );
+});
+
+test("catch-up work older than 7 days expires with its copies; recent and future work stays", () => {
+  assert.equal(aylaCatchUpCutoffDate("2026-09-30"), "2026-09-23");
+  assert.equal(aylaCatchUpCutoffDate("not-a-date"), "");
+  const rows = [
+    { id: "old", scheduledDate: "2026-08-31", status: "pending" },
+    { id: "recent", scheduledDate: "2026-09-28", status: "pending" },
+    { id: "old-copy", scheduledDate: "2026-09-29", status: "pending", overdueCarry: true, linkedAssignmentIds: ["old"] },
+    { id: "future-copy", scheduledDate: "2026-10-01", status: "pending", overdueCarry: true, linkedAssignmentIds: ["old"] },
+    { id: "done", scheduledDate: "2026-08-20", status: "completed" },
+  ];
+  const result = aylaExpiredCatchUpAssignments(rows, "2026-09-30");
+  assert.deepEqual(result.roots.map((row) => row.id), ["old"]);
+  assert.deepEqual(result.copies.map((row) => row.id), ["old-copy"]);
+  assert.deepEqual(aylaExpiredCatchUpAssignments(rows, "").roots, []);
 });
