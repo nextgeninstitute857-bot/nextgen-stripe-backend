@@ -75467,6 +75467,25 @@ app.post("/admin/email/send", async (req, res) => {
   }
 });
 
+// Sends a test through the AylaMed transport (support@aylamedapp.com) without touching any account.
+app.post("/admin/email/test-aylamed", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const to = normalizeEmail(req.body?.to || "");
+    if (!to || !to.includes("@")) return res.status(400).json({ success: false, error: "A recipient email is required" });
+    const provider = await sendEmailMessage({
+      to,
+      subject: String(req.body?.subject || "AylaMed email test").slice(0, 200),
+      text: String(req.body?.text || "Hi Doctor,\n\nThis is a test from AylaMed.\n\nIf you can read this, emails from support@aylamedapp.com are working.\n\nAylaMed Team").slice(0, 5000),
+      transport: "aylamed",
+      brand: "aylamed",
+    });
+    res.json({ success: true, to, from: ngAylaEmailFromAddress(), provider: provider?.provider || null, message_id: provider?.messageId || provider?.id || null });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message, aylamed: ngAylaEmailTransportStatus() });
+  }
+});
+
 app.post("/admin/email/test", async (req, res) => {
   try {
     await requireAdmin(req);
