@@ -5275,7 +5275,7 @@ function isPaidEnrollmentActive(enrollment = {}, plan = null, db = null) {
   return expiresAt.getTime() >= Date.now();
 }
 
-function ngApplyPaidAccessWindow(db = {}, enrollment = {}, { plan = null, paidAt = null, source = "paid_access" } = {}) {
+function ngApplyPaidAccessWindow(db = {}, enrollment = {}, { plan = null, paidAt = null, source = "paid_access", creditKey = "", alreadyCredited = false } = {}) {
   if (!enrollment?.id) return enrollment;
   const resolvedPlan = plan || (enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null);
   const now = paidAt ? new Date(paidAt) : new Date();
@@ -5303,6 +5303,15 @@ function ngApplyPaidAccessWindow(db = {}, enrollment = {}, { plan = null, paidAt
     enrollment.minimum_teaching_days = LMS_FULL_TEACHING_PLAN_DAYS;
     enrollment.program_teaching_days = Number(resolution.schedule?.teaching_days || 0) || null;
     enrollment.program_final_teaching_date = resolution.schedule?.final_teaching_date || null;
+  } else if (creditKey) {
+    // Monthly-style plans: each payment adds its days on top of any time the
+    // student still has left, and the same payment is only ever counted once.
+    const credited = Array.isArray(enrollment.access_credited_payments) ? enrollment.access_credited_payments : [];
+    if (!(alreadyCredited || credited.includes(creditKey)) || !enrollment.access_expires_at) {
+      const remainingUntil = ngPaidAccessExpiresAt(enrollment)?.getTime() || 0;
+      enrollment.access_expires_at = addDays(new Date(Math.max(now.getTime(), remainingUntil)), accessDays).toISOString();
+      enrollment.access_credited_payments = [...credited.filter((key) => key !== creditKey), creditKey].slice(-24);
+    }
   } else {
     enrollment.access_expires_at = addDays(now, accessDays).toISOString();
   }
@@ -5450,7 +5459,13 @@ async function ngHandleStripeCheckoutCompleted(event = {}, req = null) {
 
   const paidAt = session.created ? new Date(Number(session.created) * 1000).toISOString() : new Date().toISOString();
   enrollment.plan_id = planId || enrollment.plan_id || null;
-  ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt, source: "stripe_webhook_checkout_completed" });
+  ngApplyPaidAccessWindow(db, enrollment, {
+    plan,
+    paidAt,
+    source: "stripe_webhook_checkout_completed",
+    creditKey: String(session.id || paymentId || ""),
+    alreadyCredited: String(payment.status || "").toLowerCase() === "completed",
+  });
 
   const grossPaymentCents = Number(session.amount_total ?? payment.amount_cents ?? metadata.finalAmountCents ?? 0) || 0;
   const stripeFee = await ngResolveStripeProcessingFee({
