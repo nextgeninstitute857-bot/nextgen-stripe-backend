@@ -5,7 +5,9 @@ import {
   AYLA_PERSONAL_TUTOR_ENGINE,
   buildAylaPersonalTutorDecision,
   formatAylaPersonalTutorAnswer,
+  gateAylaFirstSelfAssessment,
   isAylaPersonalTutorPlanningIntent,
+  workloadStudentMessage,
   validateAylaPersonalTutorPlanCommand,
 } from "../lib/aylamed-personal-tutor.js";
 
@@ -224,6 +226,7 @@ test("Personal Tutor suggests an exam-scoped full self-assessment without creati
       dailyHours: 3,
       weakAreas: ["Internal Medicine"],
     },
+    questionAttempts: practicedQuestions(120),
     nbmeForms: [{
       id: "nbme-step-2-ck-form-15",
       formType: "comprehensive_self_assessment",
@@ -408,4 +411,51 @@ test("server wires v213 Personal Tutor into the existing adaptive plan without L
   const section = server.slice(server.indexOf("async function aylaV213PersonalTutorSnapshot"), server.indexOf("function aylaV189RecordActivity"));
   assert.doesNotMatch(section, /writeLiveDb\s*\(/);
   assert.doesNotMatch(section, /writeCrmDb\s*\(/);
+});
+
+function practicedQuestions(count) {
+  return Array.from({ length: count }, (_, index) => ({ serverVerified: true, outcome: index % 3 ? "correct" : "incorrect", resourceId: `practice-${index + 1}`, system: "Cardiovascular" }));
+}
+
+const fullForm = { id: "nbme-step-1-form-31", formType: "comprehensive_self_assessment", examTrack: "usmle-step-1", studentEnabled: true };
+
+test("Personal Tutor asks for practice before a first full self-assessment", () => {
+  const decision = buildAylaPersonalTutorDecision(baseInput({ nbmeForms: [fullForm], nbmeAttempts: [], questionAttempts: practicedQuestions(30) }));
+  assert.equal(decision.nbmeReadiness.recommendation.state, "practice_before_first_form");
+  assert.match(decision.nbmeReadiness.recommendation.reason, /about 70 more practice questions/);
+  const recommendation = decision.recommendations.find((row) => row.kind === "self_assessment_readiness");
+  assert.equal(recommendation.actionTarget.appRoute, "/dashboard/qbank");
+  assert.doesNotMatch(formatAylaPersonalTutorAnswer(decision), /Take your first full self-assessment/);
+});
+
+test("First self-assessment gate: practice, study-first and behind states", () => {
+  const snapshot = { recommendation: { state: "baseline_due", title: "Take your first full self-assessment", reason: "x", form_id: "f1" } };
+  assert.equal(gateAylaFirstSelfAssessment(snapshot, { practiceQuestionCount: 150 }).recommendation.state, "baseline_due");
+  assert.equal(gateAylaFirstSelfAssessment(snapshot, { practiceQuestionCount: 150, studyFirst: true }).recommendation.state, "practice_before_first_form");
+  assert.equal(gateAylaFirstSelfAssessment(snapshot, { practiceQuestionCount: 150, workloadState: "falling_behind" }).recommendation.state, "practice_before_first_form");
+  const resume = { recommendation: { state: "resume_in_progress", title: "Resume" } };
+  assert.equal(gateAylaFirstSelfAssessment(resume, { practiceQuestionCount: 0 }), resume);
+});
+
+test("Not finishing a small plan is 'falling behind', not overload, and keeps the plan size", () => {
+  const decision = buildAylaPersonalTutorDecision(baseInput({
+    recentPlans: [
+      { date: "2026-07-19", completionPercent: 10, status: "active" },
+      { date: "2026-07-18", completionPercent: 0, status: "active" },
+      { date: "2026-07-17", completionPercent: 20, status: "active" },
+    ],
+  }));
+  assert.equal(decision.workload.state, "falling_behind");
+  assert.equal(decision.workload.workloadAdjustment, "standard");
+  assert.equal(decision.workload.questionVolumeAdjustment, "standard");
+  assert.equal(decision.recommendations.some((row) => row.kind === "reduce_workload"), false);
+  assert.match(decision.workload.studentMessage, /less than half of your plan on 3 of your last 3 study days/);
+  assert.match(decision.workload.studentMessage, /Start with just the first task/);
+  assert.match(formatAylaPersonalTutorAnswer(decision), /Your plan isn't too big/);
+});
+
+test("Workload messages are plain language", () => {
+  assert.match(workloadStudentMessage({ state: "falling_behind", planned: 49, capacity: 360, recent: { lowCompletionDays: 3, observedDays: 3 } }), /about 49 minutes of your 6-hour study day/);
+  assert.match(workloadStudentMessage({ state: "overloaded", recommendedQuestionCount: 10 }), /lighten today to about 10 questions/);
+  assert.equal(workloadStudentMessage({ state: "balanced" }), "");
 });
