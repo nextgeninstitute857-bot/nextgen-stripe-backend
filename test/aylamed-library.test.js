@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
   aylaLibraryAssignmentProgress,
+  sanitizeAylaHiddenSourceText,
   buildAylaLibraryCatalog,
   buildAylaLibraryPage,
   buildAylaLibraryReader,
@@ -262,7 +263,7 @@ test("student output hides raw source locations and obeys the admin source-label
   assert.equal(hidden.edition, "");
   assert.equal(hidden.title, "Cardiac murmurs");
   assert.equal(hidden.description, "Read before the next review.");
-  assert.equal(hidden.page_range, "pages 8 9");
+  assert.equal(hidden.page_range, "pages 8-9");
   assert.doesNotMatch(JSON.stringify(hidden), /Internal notes|Hidden source/i);
   const hiddenReader = buildAylaLibraryReader(normalizeAylaLibraryResource(reading({
     id: "internal-reader",
@@ -426,4 +427,12 @@ test("server wires one entitlement-guarded Library into the existing roadmap wit
   const libraryRoutes = server.slice(server.indexOf("// v211 Library:"), server.indexOf("app.get(\"/api/ayla/students/:studentId/content-hub\""));
   assert.doesNotMatch(libraryRoutes, /writeCrmDb\(/);
   assert.doesNotMatch(libraryRoutes, /sourceUrl\s*:|source_url\s*:/);
+});
+
+test("hidden-source text keeps ordinary separators and tidies only removed-name gaps", () => {
+  const book = { bookTitle: "First Aid for the USMLE Step 1", edition: "2023" };
+  assert.equal(sanitizeAylaHiddenSourceText("Focus: Neurology — Neuropharmacology — Other", book, "", 300), "Focus: Neurology — Neuropharmacology — Other");
+  assert.equal(sanitizeAylaHiddenSourceText("Read: First Aid for the USMLE Step 1 — Parkinson disease therapy", book, "", 300), "Read: Parkinson disease therapy");
+  assert.equal(sanitizeAylaHiddenSourceText("Anatomy — First Aid for the USMLE Step 1 — Brachial plexus", book, "", 300), "Anatomy — Brachial plexus");
+  assert.equal(sanitizeAylaHiddenSourceText("First Aid for the USMLE Step 1", book, "Approved reading", 300), "Approved reading");
 });
