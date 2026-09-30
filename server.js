@@ -88631,8 +88631,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       || selection.resumed
       || selection.match_level === "exact_topic";
     if (pick.length && finalReviewReadingAllowed) {
-      const readingLabel = pick[0].sourceLabelVisible ? pick[0].bookTitle || pick[0].title : pick[0].title || pick[0].topic || "Approved reading";
-      aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "reading", pick, `${selection.resumed ? "Continue" : "Read"}: ${readingLabel} — ${pick[0].pageRange}`, {
+      // Title the task by the section's real topic (e.g. "Parkinson disease therapy"); structured
+      // books only have placeholder ranges like "Source section 1001", which mean nothing to students.
+      const readingSection = String(pick[0].title || pick[0].topic || "").trim();
+      const readingBook = pick[0].sourceLabelVisible ? String(pick[0].bookTitle || "").trim() : "";
+      const readingRange = /^source section\b/i.test(String(pick[0].pageRange || "")) ? "" : String(pick[0].pageRange || "").trim();
+      const readingLabel = [readingSection && readingSection !== readingBook ? readingSection : "", readingBook].filter(Boolean).join(" — ") || "Approved reading";
+      aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "reading", pick, `${selection.resumed ? "Continue" : "Read"}: ${readingLabel}${readingRange ? ` (${readingRange})` : ""}`, {
         system: focusSystem,
         subsystem: pick[0].subsystem || focusSubsystem,
         topic: pick[0].topic || focusTopic,
