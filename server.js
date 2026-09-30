@@ -82301,6 +82301,8 @@ async function aylaRunContinuityEngagementCycle({
         to: claim.to,
         subject: claim.subject,
         text: claim.text,
+        transport: "aylamed",
+        brand: "aylamed",
       });
       await aylaFinalizeContinuityDelivery(claim.deliveryId, { sent: true, provider });
       summary.sent += 1;
@@ -89992,6 +89994,8 @@ app.post("/api/ayla/auth/forgot-password", async (req, res) => {
         to: user.email,
         subject: "Reset your AylaMed password",
         text: `A password reset was requested for your AylaMed account.\n\nOpen this secure link within 45 minutes:\n${resetUrl}\n\nIf you did not request this, ignore this email.`,
+        transport: "aylamed",
+        brand: "aylamed",
       });
       token.emailSentAt = aylaNow();
       aylaSetItem(db, "aylaPasswordResetTokens", token);
