@@ -66584,6 +66584,51 @@ function ngWebsiteMaybeAddContactAsk(reply = "", lead = {}) {
   return `${text}\n\nAlso, please share your WhatsApp number or email so we can send you the demo/session details and follow up if you leave the page.`;
 }
 
+// Homepage "Book a free USMLE consultation" form. The page has always posted here,
+// but the route was missing, so every request failed. Requests now become CRM
+// website leads (same helpers as the website chat) with the preferred time attached.
+app.post("/contact/book-meeting", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const name = normalizeCrmString(body.name || "").slice(0, 120);
+    const email = normalizeEmail(body.email || "");
+    const whatsapp = normalizeCrmString(body.whatsapp || body.phone || "").slice(0, 40);
+    if (!name || !email || !email.includes("@") || !whatsapp) {
+      return res.status(400).json({ success: false, error: "Please add your name, email and WhatsApp number." });
+    }
+    const preferredDate = normalizeCrmString(body.preferred_date || "").slice(0, 40);
+    const preferredTime = normalizeCrmString(body.preferred_time || "").slice(0, 40);
+    const timezone = normalizeCrmString(body.timezone || "").slice(0, 80);
+    const note = normalizeCrmString(body.message || "").slice(0, 1000);
+    const page = normalizeCrmString(body.source || body.page || "homepage").slice(0, 80) || "homepage";
+    const when = [preferredDate, preferredTime].filter(Boolean).join(" ");
+    const text = `Consultation request${when ? ` for ${when}` : ""}${timezone ? ` (${timezone})` : ""}.${note ? ` ${note}` : ""}`;
+
+    const db = typeof ngEnsureAiStore === "function" ? ngEnsureAiStore(await readCrmDb()) : await readCrmDb();
+    const sessionId = ngWebsiteSessionId(body.session_id || body.sessionId);
+    const visitor = { name, email, whatsapp };
+    const lead = ngFindOrCreateWebsiteLead(db, { sessionId, visitor, message: text, page, campaign: "homepage_booking", intent: "consultation_booking" });
+    ngWebsiteApplyContactToLead(lead, { email, phone: whatsapp });
+    lead.name = lead.name || name;
+    lead.consultation_request = {
+      preferred_date: preferredDate || null,
+      preferred_time: preferredTime || null,
+      timezone: timezone || null,
+      duration_minutes: Number(body.duration_minutes) || null,
+      message: note || null,
+      requested_at: nowIso(),
+      source: page,
+    };
+    lead.updated_at = nowIso();
+    ngAppendWebsiteConversation(db, { lead, sessionId, direction: "inbound", text, page, campaign: "homepage_booking", metadata: { consultation_booking: true } });
+    await writeCrmDb(db);
+    return res.json({ success: true, lead_id: lead.id, message: "Thanks! We'll contact you on WhatsApp to confirm a time." });
+  } catch (error) {
+    console.error("Consultation booking failed:", error.message);
+    return res.status(500).json({ success: false, error: "We couldn't send your request. Please try again or message us on WhatsApp." });
+  }
+});
+
 app.post("/website-chat/ayla", async (req, res) => {
   try {
     const body = req.body || {};
