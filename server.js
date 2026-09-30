@@ -449,6 +449,8 @@ import {
 } from "./lib/aylamed-adaptive-core.js";
 import {
   aylaOriginalOverdueAssignment,
+  aylaExpiredCatchUpAssignments,
+  AYLA_CATCH_UP_MAX_AGE_DAYS,
   aylaOverdueTitle,
 } from "./lib/aylamed-overdue.js";
 import {
@@ -86935,11 +86937,15 @@ function aylaV189CompletedResourceIds(db, student) {
 }
 
 function aylaV189OverdueAssignments(db, student, date) {
-  return aylaValues(db, "aylaResourceAssignments")
+  const rows = aylaValues(db, "aylaResourceAssignments")
     .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
     .filter((row) => String(row.scheduledDate || "") < String(date || ""))
     .filter((row) => !["completed", "skipped", "cancelled", "superseded", "moved"].includes(String(row.status || "pending").toLowerCase()))
     .sort((a, b) => String(a.scheduledDate || "").localeCompare(String(b.scheduledDate || "")));
+  // Catch-up work older than AYLA_CATCH_UP_MAX_AGE_DAYS no longer counts as unfinished.
+  const expired = aylaExpiredCatchUpAssignments(rows, date);
+  const expiredIds = new Set([...expired.roots, ...expired.copies].map((row) => String(row.id)));
+  return rows.filter((row) => !expiredIds.has(String(row.id)));
 }
 
 function aylaV189MakeAssignment(db, student, plan, date, category, resources, title, options = {}) {
@@ -87817,6 +87823,7 @@ function aylaV189FocusCandidates(
   overdue = [],
   continuityReferences = [],
   systemProgress = null,
+  expiredCatchUp = [],
 ) {
   const progress = Array.isArray(systemProgress) ? systemProgress : aylaV189SystemProgress(db, student);
   const progressBySystem = new Map(progress.map((row, index) => [aylaV189SystemKey(row.system), { row, index }]));
@@ -87849,6 +87856,7 @@ function aylaV189FocusCandidates(
   });
   revisions.forEach((revision) => touch(revision.system, revision.subsystem, revision.topic, 180, revision.resourceId, "Revision is due today"));
   overdue.forEach((assignment) => touch(assignment.system, assignment.subsystem, assignment.topic, 140, null, "Priority work is overdue"));
+  expiredCatchUp.forEach((assignment) => touch(assignment.system, assignment.subsystem, assignment.topic, 120, null, "Fresh start on a topic from an earlier week"));
   aylaCleanArray(student.weakAreas).forEach((system, index) => touch(system, "", "Core review", 90 - index * 8, null, "Selected weak area"));
   continuityReferences.forEach((reference) => touch(
     reference.system,
@@ -88054,6 +88062,20 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const linkedAssignmentIdsForDate = new Set(studentAssignments
     .filter((candidate) => String(candidate.scheduledDate) === String(date) && !["completed", "cancelled", "superseded"].includes(String(candidate.status || "").toLowerCase()))
     .flatMap((candidate) => aylaCleanArray(candidate.linkedAssignmentIds).map(String)));
+  // Retire catch-up work older than AYLA_CATCH_UP_MAX_AGE_DAYS instead of carrying it
+  // forward forever. It is marked superseded (so it stops counting as unfinished) and
+  // its topics are boosted below so today gets fresh work on the same material.
+  const expiredCatchUp = aylaExpiredCatchUpAssignments(studentAssignments, date);
+  if (expiredCatchUp.roots.length || expiredCatchUp.copies.length) {
+    const expiredAt = aylaNow();
+    for (const row of [...expiredCatchUp.roots, ...expiredCatchUp.copies]) {
+      row.status = "superseded";
+      row.supersededReason = "catch_up_expired";
+      row.expiredAt = expiredAt;
+      row.updatedAt = expiredAt;
+      aylaSetItem(db, "aylaResourceAssignments", row);
+    }
+  }
   const overdue = studentAssignments
     .filter((row) => String(row.scheduledDate || "") < String(date || ""))
     .filter((row) => !["completed", "skipped", "cancelled", "superseded", "moved"].includes(String(row.status || "pending").toLowerCase()))
@@ -88118,6 +88140,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     overdue,
     continuityReferences,
     systemProgress,
+    expiredCatchUp.roots,
   );
   const tutorProposal = await aylaV189TutorProposal(db, student, date, focusCandidates, allRelevant, options);
   planningTimings.tutor_ms = Date.now() - planningStartedAt - planningTimings.history_and_stored_ms - planningTimings.content_inputs_ms;
@@ -88186,6 +88209,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     completionPercent: 0,
     assignmentIds: [],
     missingResourceTypes: [],
+    expiredCatchUp: expiredCatchUp.roots.length
+      ? {
+        count: expiredCatchUp.roots.length,
+        maxAgeDays: AYLA_CATCH_UP_MAX_AGE_DAYS,
+        topics: [...new Set(expiredCatchUp.roots.map((row) => aylaV189CleanText(row.topic || row.system || "")).filter(Boolean))].slice(0, 5),
+      }
+      : null,
     focusSystem,
     focusSubsystem,
     focusTopic,
@@ -89564,6 +89594,14 @@ function aylaV214WeakSignals(db = {}, student = {}, lmsContext = null) {
   return signals;
 }
 
+function aylaWeakAreaIsProvisional(row = {}) {
+  const projection = String(row.projectionType || "").toLowerCase();
+  if (projection === "verified_adaptive_core") return false;
+  if (["provisional_self_report", "baseline_pending"].includes(projection) || row.provisional === true) return true;
+  // Rows created before projectionType existed: the sign-up placeholders.
+  return !projection && /\broadmap focus\b/i.test(String(row.topic || ""));
+}
+
 function aylaV227RefreshWeakAreaProjection(db = {}, student = {}) {
   const exam = aylaV227ExamFields(student);
   const summary = buildCrossSystemWeakAreaSummary(aylaV214WeakSignals(db, student, null));
@@ -89619,8 +89657,30 @@ function aylaV227RefreshWeakAreaProjection(db = {}, student = {}) {
       aylaSetItem(db, "aylaWeakAreaLogs", row);
     });
 
+  // Weak areas guessed at sign-up (self-reported / baseline pending) are retired as
+  // soon as the student has real results in that system, so they cannot stay open
+  // forever next to the verified picture.
+  const measuredSystems = new Set(aylaV189SystemProgress(db, student)
+    .filter((row) => Number(row.evidenceCount || 0) > 0)
+    .map((row) => aylaV189SystemKey(row.system)));
+  let retiredProvisional = 0;
+  aylaValues(db, "aylaWeakAreaLogs")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
+    .filter((row) => String(row.status || "Open").toLowerCase() !== "resolved")
+    .filter((row) => aylaWeakAreaIsProvisional(row))
+    .filter((row) => measuredSystems.has(aylaV189SystemKey(row.system)))
+    .forEach((row) => {
+      row.status = "Resolved";
+      row.resolvedAt = row.resolvedAt || aylaNow();
+      row.resolvedReason = "replaced_by_verified_results";
+      row.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaWeakAreaLogs", row);
+      retiredProvisional += 1;
+    });
+
   return {
     count: summary.weakAreas?.length || 0,
+    retiredProvisional,
     sharedUnderlyingTopics: summary.sharedUnderlyingTopics?.length || 0,
     verifiedEvidenceOnly: true,
   };
