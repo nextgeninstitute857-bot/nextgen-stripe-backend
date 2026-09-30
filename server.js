@@ -13432,6 +13432,194 @@ app.post("/admin/live-sessions/shift-to-noon-eastern", async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Admin "Schedule" page: change the live class time for every future class from
+// a date. Preview first; applying also moves already-created Zoom meetings.
+// Classes that already have a recording are never touched.
+const NEXTGEN_CLASS_TIME_CHANGE_CONFIRMATION = "CHANGE_CLASS_TIME";
+const NEXTGEN_CLASS_TIME_ZONES = {
+  "America/New_York": "Eastern",
+  "Asia/Karachi": "Pakistan time",
+  "Europe/London": "UK time",
+  "Asia/Kolkata": "India time",
+  "UTC": "UTC",
+};
+
+function ngClassTimeLabel(time = "", timezone = "") {
+  const [hours, minutes] = String(time).split(":").map(Number);
+  const suffix = hours >= 12 ? "PM" : "AM";
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${hour12}:${String(minutes).padStart(2, "0")} ${suffix} ${NEXTGEN_CLASS_TIME_ZONES[timezone] || timezone}`;
+}
+
+function ngPlanClassTimeChange({ liveDb = {}, courseId = "", effectiveDate = "", time = "", timezone = "" } = {}) {
+  const plan = { sessions_to_update: [], zoom_meetings_to_move: [], shared_zoom_meetings: 0, recording_sessions_preserved: 0, roadmap_days: [] };
+  // A Zoom meeting used by more than one class (recurring link) is never moved:
+  // moving it would shift every class on it. Only the class time is updated.
+  const zoomUseCount = {};
+  for (const session of Object.values(liveDb.liveSessions || {})) {
+    const meetingId = String(session?.zoom_meeting_id || "");
+    if (hasRealZoomMeetingId(meetingId)) zoomUseCount[meetingId] = (zoomUseCount[meetingId] || 0) + 1;
+  }
+  for (const session of Object.values(liveDb.liveSessions || {})) {
+    if (String(session?.course_id || "") !== String(courseId)) continue;
+    if (String(session?.scheduled_date || "").slice(0, 10) < effectiveDate) continue;
+    if (["completed", "cancelled", "canceled", "archived", "hidden", "deleted"].includes(String(session?.status || "scheduled").toLowerCase())) continue;
+    if (session.recording_url || session.recording_id || session.transcript_url || session.transcript_imported) {
+      plan.recording_sessions_preserved += 1;
+      continue;
+    }
+    const row = {
+      id: session.id,
+      title: session.title || session.topic || "Live Class",
+      date: String(session.scheduled_date || "").slice(0, 10),
+      from_time: session.scheduled_time || null,
+      from_timezone: session.scheduled_timezone || null,
+      to_time: time,
+      to_timezone: timezone,
+    };
+    if (row.from_time === time && (row.from_timezone || timezone) === timezone) continue;
+    const meetingId = String(session.zoom_meeting_id || "");
+    if (hasRealZoomMeetingId(meetingId) && zoomUseCount[meetingId] === 1) plan.zoom_meetings_to_move.push({ ...row, zoom_meeting_id: meetingId });
+    else {
+      if (hasRealZoomMeetingId(meetingId)) plan.shared_zoom_meetings += 1;
+      plan.sessions_to_update.push(row);
+    }
+  }
+  for (const roadmap of Object.values(liveDb.roadmaps || {})) {
+    if (String(roadmap?.course_id || roadmap?.courseId || "") !== String(courseId)) continue;
+    for (const day of Array.isArray(roadmap.days) ? roadmap.days : []) {
+      if (String(day?.date || "").slice(0, 10) < effectiveDate || ngRoadmapDayIsNoClass(day)) continue;
+      plan.roadmap_days.push(day.id);
+    }
+  }
+  plan.sessions_to_update.sort((a, b) => a.date.localeCompare(b.date));
+  plan.zoom_meetings_to_move.sort((a, b) => a.date.localeCompare(b.date));
+  return plan;
+}
+
+app.post("/admin/schedule/class-time", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.live_sessions.manage");
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const effectiveDate = String(req.body.effective_date || req.body.effectiveDate || "").slice(0, 10);
+    const time = String(req.body.time || "").trim();
+    const timezone = String(req.body.timezone || "America/New_York").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "Choose a course." });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) return res.status(400).json({ success: false, error: "Choose the first date the new time applies to." });
+    if (effectiveDate < ngEasternDateKey(new Date())) return res.status(400).json({ success: false, error: "The new time can only start today or later." });
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return res.status(400).json({ success: false, error: "Choose a valid class time." });
+    if (!NEXTGEN_CLASS_TIME_ZONES[timezone]) return res.status(400).json({ success: false, error: "Choose Eastern, Pakistan, UK, India or UTC time." });
+
+    const sourceLiveDb = await readLiveDb();
+    const course = sourceLiveDb.courses?.[courseId] || Object.values(sourceLiveDb.courses || {}).find((item) => String(item?.id || "") === courseId);
+    if (!course?.id) return res.status(404).json({ success: false, error: "Course not found." });
+    const label = ngClassTimeLabel(time, timezone);
+    const plan = ngPlanClassTimeChange({ liveDb: sourceLiveDb, courseId: course.id, effectiveDate, time, timezone });
+    const summary = {
+      course_id: course.id,
+      effective_date: effectiveDate,
+      time,
+      timezone,
+      label,
+      current_label: course.class_time ? ngClassTimeLabel(String(course.class_time).slice(0, 5), course.scheduled_timezone || "America/New_York") : null,
+      classes_to_update: plan.sessions_to_update.length + plan.zoom_meetings_to_move.length,
+      zoom_meetings_to_move: plan.zoom_meetings_to_move.length,
+      roadmap_days_to_update: plan.roadmap_days.length,
+      recordings_untouched: plan.recording_sessions_preserved,
+      shared_zoom_links_kept: plan.shared_zoom_meetings,
+      first_classes: [...plan.zoom_meetings_to_move, ...plan.sessions_to_update].sort((a, b) => a.date.localeCompare(b.date)).slice(0, 5),
+    };
+    if (req.body.preview !== false) {
+      return res.json({ success: true, preview: true, changed: false, summary, confirmation_required: NEXTGEN_CLASS_TIME_CHANGE_CONFIRMATION });
+    }
+    if (String(req.body.confirm || "").trim().toUpperCase() !== NEXTGEN_CLASS_TIME_CHANGE_CONFIRMATION) {
+      return res.status(400).json({ success: false, error: `confirm must be ${NEXTGEN_CLASS_TIME_CHANGE_CONFIRMATION}.`, summary });
+    }
+
+    // Move Zoom meetings first; a class whose Zoom move fails keeps its old time.
+    const zoomResults = [];
+    if (plan.zoom_meetings_to_move.length) {
+      const accessToken = await getZoomAccessToken();
+      for (const row of plan.zoom_meetings_to_move) {
+        try {
+          await axios.patch(
+            `https://api.zoom.us/v2/meetings/${encodeURIComponent(row.zoom_meeting_id)}`,
+            { start_time: `${row.date}T${time}:00`, timezone },
+            { headers: { Authorization: `Bearer ${accessToken}` } },
+          );
+          zoomResults.push({ id: row.id, zoom_meeting_id: row.zoom_meeting_id, moved: true });
+        } catch (error) {
+          zoomResults.push({ id: row.id, zoom_meeting_id: row.zoom_meeting_id, moved: false, error: error.response?.data?.message || error.message });
+        }
+      }
+    }
+    const movedIds = new Set(zoomResults.filter((row) => row.moved).map((row) => String(row.id)));
+    const updateIds = new Set([...plan.sessions_to_update.map((row) => String(row.id)), ...movedIds]);
+    const roadmapDayIds = new Set(plan.roadmap_days.map(String));
+
+    const liveDb = await readLiveDb();
+    const now = nowIso();
+    for (const session of Object.values(liveDb.liveSessions || {})) {
+      if (!updateIds.has(String(session?.id))) continue;
+      session.scheduled_time = time;
+      session.scheduled_timezone = timezone;
+      session.updated_by = user.id;
+      session.updated_at = now;
+    }
+    const liveCourse = liveDb.courses?.[course.id];
+    if (liveCourse) {
+      liveCourse.class_time = time;
+      liveCourse.scheduled_timezone = timezone;
+      if (liveCourse.schedule && typeof liveCourse.schedule === "object") liveCourse.schedule.class_time = time;
+      if (liveCourse.settings && typeof liveCourse.settings === "object") liveCourse.settings.class_time = time;
+      liveCourse.updated_by = user.id;
+      liveCourse.updated_at = now;
+    }
+    for (const roadmap of Object.values(liveDb.roadmaps || {})) {
+      if (String(roadmap?.course_id || roadmap?.courseId || "") !== String(course.id)) continue;
+      roadmap.class_time = time;
+      roadmap.scheduled_timezone = timezone;
+      roadmap.settings = { ...(roadmap.settings || {}), class_time: time, timezone };
+      for (const day of Array.isArray(roadmap.days) ? roadmap.days : []) {
+        if (!roadmapDayIds.has(String(day?.id))) continue;
+        day.class_time = time;
+        day.scheduled_time = time;
+        day.scheduled_timezone = timezone;
+        day.updated_by = user.id;
+        day.updated_at = now;
+      }
+    }
+    liveDb.liveSessionScheduleChanges = Array.isArray(liveDb.liveSessionScheduleChanges) ? liveDb.liveSessionScheduleChanges : [];
+    liveDb.liveSessionScheduleChanges.unshift({ id: uuid(), course_id: course.id, effective_date: effectiveDate, to_time: time, timezone, label, summary, zoom_results: zoomResults, applied_by: user.id, applied_at: now });
+    await writeLiveDb(liveDb);
+
+    // Keep the CRM / AI replies quoting the right class time.
+    const crmDb = await readCrmDb();
+    crmDb.settings = { ...(crmDb.settings || {}), live_session_time: label, default_live_session_time: label, live_session_timezone: timezone, updated_by: user.id, updated_at: now };
+    for (const settings of Array.isArray(crmDb.live_conversion_settings) ? crmDb.live_conversion_settings : []) {
+      settings.session_time = time;
+      settings.live_session_time = time;
+      settings.updated_by = user.id;
+      settings.updated_at = now;
+    }
+    await writeCrmDb(crmDb);
+
+    const zoomFailed = zoomResults.filter((row) => !row.moved);
+    res.json({
+      success: true,
+      preview: false,
+      changed: true,
+      summary: { ...summary, classes_updated: updateIds.size, zoom_moved: movedIds.size, zoom_failed: zoomFailed },
+      message: zoomFailed.length
+        ? `Classes from ${effectiveDate} now start at ${label}. ${zoomFailed.length} Zoom meeting(s) could not be moved and keep their old time — please change them in Zoom.`
+        : `Classes from ${effectiveDate} now start at ${label}.`,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Could not change the class time." });
+  }
+});
+
 app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => {
   try {
     const { user } = await requireLmsPermission(req, "lms.live_sessions.manage");
@@ -35916,9 +36104,14 @@ function ngDailyLiveSessionActionNow(settings = {}, date = new Date(), session =
   if (["cancelled", "canceled", "archived", "hidden", "deleted"].includes(sessionStatus)) return null;
   const sessionCompleted = ["completed", "ended", "past"].includes(sessionStatus);
   const reminderMinutes = Number(settings.session_reminder_minutes || settings.default_session_reminder_minutes || 5);
-  const [sessionHour = 12, sessionMinute = 0] = String(session.time || session.scheduled_time || NEXTGEN_LIVE_CLASS_TIME)
+  let [sessionHour = 12, sessionMinute = 0] = String(session.time || session.scheduled_time || NEXTGEN_LIVE_CLASS_TIME)
     .split(":")
     .map((value) => Number(value));
+  const sessionTimezone = String(session.timezone || session.scheduled_timezone || tz);
+  if (sessionTimezone !== tz && Number.isFinite(sessionHour) && Number.isFinite(sessionMinute)) {
+    const startUtc = getSessionStartUtc(sessionDate, `${String(sessionHour).padStart(2, "0")}:${String(sessionMinute).padStart(2, "0")}`, sessionTimezone);
+    if (startUtc) ({ hour: sessionHour, minute: sessionMinute } = ngDailySessionTimeParts(startUtc, tz));
+  }
   if (!Number.isFinite(sessionHour) || !Number.isFinite(sessionMinute)) return null;
   const total = hour * 60 + minute;
   const sessionTotal = sessionHour * 60 + sessionMinute;
@@ -66430,6 +66623,7 @@ function ngFindOrCreateWebsiteLead(db, { sessionId, visitor = {}, message = "", 
 }
 
 function ngWebsiteAylaFallbackReply(message = "", db = {}) {
+  const classTime = ngAylaFirstNonEmptySetting(db?.settings || {}, ["default_live_session_time", "live_session_time"], NEXTGEN_LIVE_CLASS_TIME_LABEL);
   const text = String(message || "").toLowerCase().trim();
   const salesAssets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db || {}) : {};
   const demoDays = Number(salesAssets.demoDays || 7);
@@ -66452,7 +66646,7 @@ function ngWebsiteAylaFallbackReply(message = "", db = {}) {
   }
 
   if (/live|session|class|(?:1|12)\s*pm|time|today|zoom|join/.test(text)) {
-    return "Doctor, our live guidance sessions run on scheduled roadmap teaching days at 12:00 PM Eastern. Students can join even for 5-10 minutes to see the teaching style. If the class is missed, we guide them with the matching recording and next session.";
+    return `Doctor, our live guidance sessions run on scheduled roadmap teaching days at ${classTime}. Students can join even for 5-10 minutes to see the teaching style. If the class is missed, we guide them with the matching recording and next session.`;
   }
 
   if (/roadmap|plan|schedule|study|curriculum|system/.test(text)) {
@@ -72549,8 +72743,8 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
     const courseId = String(req.body.course_id || req.body.courseId || "").trim();
     if (!courseId || !db.courses[courseId]) return res.status(404).json({ success: false, error: "Valid course_id is required" });
     const startDateRaw = req.body.start_date || req.body.startDate || "2026-07-01";
-    const classTime = String(req.body.class_time || req.body.scheduled_time || NEXTGEN_LIVE_CLASS_TIME).trim();
-    const timezone = String(req.body.timezone || req.body.scheduled_timezone || DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE;
+    const classTime = String(req.body.class_time || req.body.scheduled_time || db.courses[courseId].class_time || NEXTGEN_LIVE_CLASS_TIME).trim();
+    const timezone = String(req.body.timezone || req.body.scheduled_timezone || db.courses[courseId].scheduled_timezone || DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE;
     const skipSundays = req.body.skip_sundays !== false;
     const recreateSessions = req.body.recreate_live_sessions !== false && req.body.create_live_sessions !== false;
     const createFlashcards = req.body.create_flashcards !== false;
