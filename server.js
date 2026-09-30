@@ -17727,7 +17727,17 @@ app.get("/live/leaderboard", async (req, res) => {
       }
     }
 
-    const list = ngPublicLeaderboardList(db, courseId);
+    // Students see names and points only; each student keeps their own email on
+    // their own row. Admins/instructors still see emails.
+    const viewerIsStaff = ["admin", "super_admin", "instructor"].includes(String(user?.role || "").toLowerCase());
+    const viewerEmail = normalizeEmail(user?.email || "");
+    const list = ngPublicLeaderboardList(db, courseId).map((entry) => {
+      const mine = (user?.id && [entry.id, entry.user_id, entry.student_id].some((value) => String(value || "") === String(user.id)))
+        || (viewerEmail && normalizeEmail(entry.email || entry.user_email || entry.student_email || "") === viewerEmail);
+      if (viewerIsStaff || mine) return { ...entry, is_current_user: Boolean(mine) };
+      const { email, user_email, student_email, ...rest } = entry;
+      return { ...rest, is_current_user: false };
+    });
 
     res.json({ success: true, count: list.length, leaderboard: list, hidden_test_accounts: true });
   } catch (e) {
