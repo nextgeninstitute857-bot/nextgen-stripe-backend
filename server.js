@@ -87120,6 +87120,16 @@ function aylaV189ExplicitBaseline(student = {}, system = "") {
   return null;
 }
 
+function aylaV189QuestionBlockScore(rows = []) {
+  const scored = rows.map((row) => {
+    const outcome = String(row.outcome || row.result || "").toLowerCase();
+    if (outcome === "correct") return 100;
+    if (outcome === "guessed") return 55;
+    return 15;
+  });
+  return scored.length ? Math.round(scored.reduce((sum, value) => sum + value, 0) / scored.length) : 0;
+}
+
 function aylaV189BaselineFromVerifiedHistory(db, student, system) {
   const systemKey = aylaV189SystemKey(system);
   const assessmentRows = aylaValues(db, "aylaAssessmentAttempts")
@@ -87138,8 +87148,7 @@ function aylaV189BaselineFromVerifiedHistory(db, student, system) {
     .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
     .slice(0, 10);
   if (questionRows.length >= 5) {
-    const correct = questionRows.filter((row) => String(row.outcome || "").toLowerCase() === "correct").length;
-    return { percent: Math.round((correct / questionRows.length) * 100), source: "first_verified_question_block", recordedAt: questionRows[questionRows.length - 1]?.createdAt || null };
+    return { percent: aylaV189QuestionBlockScore(questionRows), source: "first_verified_question_block", recordedAt: questionRows[questionRows.length - 1]?.createdAt || null };
   }
 
   // No per-system fallback to the overall diagnostic score (see aylaV189SystemProgress).
@@ -87249,9 +87258,9 @@ function aylaV189SystemProgress(db, student) {
       const firstBlock = questionRows.slice()
         .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
         .slice(0, 10);
-      const correct = firstBlock.filter((row) => String(row.outcome || "").toLowerCase() === "correct").length;
+      // Same scale as mastery, so the first block alone never reads as "improving".
       baseline = {
-        percent: Math.round((correct / firstBlock.length) * 100),
+        percent: aylaV189QuestionBlockScore(firstBlock),
         source: "first_verified_question_block",
         recordedAt: firstBlock[firstBlock.length - 1]?.createdAt || null,
       };
@@ -89604,9 +89613,12 @@ function aylaV227RefreshWeakAreaProjection(db = {}, student = {}) {
     const id = `AYLA-WEAK-${crypto.createHash("sha256").update(identity).digest("hex").slice(0, 24)}`;
     const existing = aylaGetItem(db, "aylaWeakAreaLogs", id);
     const weaknessScore = Math.max(0, Math.min(100, aylaNumber(area.weaknessScore, 0)));
-    const priority = weaknessScore >= 85 && Number(area.evidenceCount || 0) >= 3
+    // Priority needs enough evidence: a single missed question stays Medium
+    // ("needs more practice to confirm") instead of being flagged High.
+    const evidenceCount = Number(area.evidenceCount || 0);
+    const priority = weaknessScore >= 85 && evidenceCount >= 3
       ? "Critical"
-      : weaknessScore >= 70
+      : weaknessScore >= 70 && evidenceCount >= 2
         ? "High"
         : "Medium";
     const row = {
