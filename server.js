@@ -72686,6 +72686,106 @@ async function ngRunMissedClassCheck({ dryRun = false, reason = "interval" } = {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Lectures Library sync (read-only feed). The Library pulls new class
+// recordings from here on its own schedule and adds them as lectures; this
+// site never writes into the Library. Both endpoints need the shared secret
+// (LECTURES_LIBRARY_SYNC_SECRET, 24+ chars) and answer 404 without it.
+const LECTURES_LIBRARY_SYNC_SECRET = String(process.env.LECTURES_LIBRARY_SYNC_SECRET || "").trim();
+const LECTURES_LIBRARY_SYNC_FROM = String(process.env.LECTURES_LIBRARY_SYNC_FROM || "2026-10-01").slice(0, 10);
+
+function ngLibrarySyncAuthorized(req) {
+  if (LECTURES_LIBRARY_SYNC_SECRET.length < 24) return false;
+  const provided = Buffer.from(String(req.headers["x-library-sync-secret"] || ""));
+  const expected = Buffer.from(LECTURES_LIBRARY_SYNC_SECRET);
+  return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}
+
+function ngVimeoIdOf(value = "") {
+  return (String(value || "").match(/(?:video\/|vimeo\.com\/)(\d+)/) || [])[1] || null;
+}
+
+// Class recordings for one pass round the course: from LECTURES_LIBRARY_SYNC_FROM
+// until the first system comes round again (the next cycle).
+function ngLibrarySyncItems(db = {}) {
+  const items = [];
+  for (const [courseId, roadmap] of Object.entries(db.roadmaps || {})) {
+    const courseKey = String(roadmap?.course_id || courseId);
+    const course = db.courses?.[courseKey] || Object.values(db.courses || {}).find((item) => String(item?.id || "") === courseKey);
+    if (!course || ["archived", "deleted", "draft", "inactive"].includes(String(course.status || "active").toLowerCase())) continue;
+    const teaching = (Array.isArray(roadmap.days) ? roadmap.days : [])
+      .filter((day) => day && !ngRoadmapDayIsNoClass(day) && !ngIsNoClassRoadmapDay(day) && ngKnownScheduleDate(day.date || day.scheduled_date))
+      .sort((a, b) => ngKnownScheduleDate(a.date || a.scheduled_date).localeCompare(ngKnownScheduleDate(b.date || b.scheduled_date)));
+    if (!teaching.length) continue;
+    const systemOf = (day) => String(day.system || day.chapter || "").trim();
+    const firstSystem = systemOf(teaching[0]);
+    let firstBlockEnded = false;
+    let wrapDate = null;
+    for (const day of teaching) {
+      if (systemOf(day) !== firstSystem) firstBlockEnded = true;
+      else if (firstBlockEnded) { wrapDate = ngKnownScheduleDate(day.date || day.scheduled_date); break; }
+    }
+    for (const day of teaching) {
+      const date = ngKnownScheduleDate(day.date || day.scheduled_date);
+      if (date < LECTURES_LIBRARY_SYNC_FROM || (wrapDate && date >= wrapDate)) continue;
+      const sessionId = String(day.live_session_id || day.session_id || "").trim();
+      for (const [key, recording] of Object.entries(db.recordings || {})) {
+        if (!recording || recording.published !== true || recording.hidden_from_recordings === true || !recording.vimeo_player_url) continue;
+        if (!(sessionId && String(recording.session_id || "") === sessionId) && String(recording.roadmap_day_id || "") !== String(day.id)) continue;
+        const videoId = ngVimeoIdOf(recording.vimeo_player_url);
+        const transfer = db.recordingVimeoTransfers?.[key] || {};
+        const seconds = String(transfer.vimeo_video_id || "") === String(videoId || "") && Number(transfer.vimeo_duration_seconds || 0) > 0
+          ? Number(transfer.vimeo_duration_seconds)
+          : Number(recording.duration || 0) * 60;
+        items.push({
+          recording_key: key,
+          course_id: courseKey,
+          date,
+          system: systemOf(day),
+          system_day: Number(day.system_day || 0) || null,
+          title: String(day.title || ""),
+          first_aid_pages: String(day.first_aid_pages || ""),
+          vimeo_video_id: videoId,
+          vimeo_player_url: recording.vimeo_player_url,
+          duration_seconds: seconds || null,
+        });
+      }
+    }
+  }
+  return items.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+app.get("/library-sync/class-recordings", async (req, res) => {
+  try {
+    if (!ngLibrarySyncAuthorized(req)) return res.status(404).json({ success: false, error: "Not found" });
+    const db = await readLiveDb();
+    res.json({ success: true, from: LECTURES_LIBRARY_SYNC_FROM, items: ngLibrarySyncItems(db) });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Lets the Library check before it deletes a Vimeo video that this site may
+// still be playing (the two sites share some videos).
+app.get("/library-sync/vimeo-in-use", async (req, res) => {
+  try {
+    if (!ngLibrarySyncAuthorized(req)) return res.status(404).json({ success: false, error: "Not found" });
+    const videoId = String(req.query.video_id || "").replace(/\D/g, "");
+    if (!videoId) return res.status(400).json({ success: false, error: "video_id is required" });
+    const db = await readLiveDb();
+    const uses = (value) => ngVimeoIdOf(value) === videoId || String(value || "") === videoId;
+    const inUse =
+      Object.values(db.recordings || {}).some((r) => r && [r.vimeo_player_url, r.vimeo_link, r.vimeo_video_id, r.recording_url].some(uses)) ||
+      Object.values(db.liveSessions || {}).some((s) => s && [s.vimeo_player_url, s.recording_url].some(uses)) ||
+      Object.values(db.notes || {}).some((n) => n && uses(n.recording_url)) ||
+      Object.values(db.recordingVimeoTransfers || {}).some((t) => t && [t.vimeo_video_id, t.vimeo_link, t.vimeo_player_url].some(uses));
+    res.json({ success: true, video_id: videoId, in_use: inUse });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
 function ngStartMissedClassCheckScheduler() {
   if (!NEXTGEN_MISSED_CLASS_CHECK_ENABLED || ngMissedClassCheckTimer) return ngMissedClassCheckTimer;
   ngMissedClassCheckTimer = setInterval(() => {
