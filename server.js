@@ -72556,6 +72556,10 @@ async function ngZoomClassEvidenceForDate({ meetingId = "", dateKey = "", timezo
 function ngMissedClassCandidates(db = {}, now = new Date()) {
   const rows = [];
   for (const [courseId, roadmap] of Object.entries(db.roadmaps || {})) {
+    // Only live, active courses; leftover roadmaps of removed courses are ignored.
+    const courseKey = String(roadmap?.course_id || courseId);
+    const course = db.courses?.[courseKey] || Object.values(db.courses || {}).find((item) => String(item?.id || "") === courseKey);
+    if (!course || ["archived", "deleted", "draft", "inactive"].includes(String(course.status || "active").toLowerCase())) continue;
     for (const day of Array.isArray(roadmap?.days) ? roadmap.days : []) {
       if (!day?.id || ngRoadmapDayIsNoClass(day) || ngIsNoClassRoadmapDay(day)) continue;
       const timezone = ngRoadmapTimezone(roadmap, day);
