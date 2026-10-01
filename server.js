@@ -72140,9 +72140,9 @@ app.post("/admin/roadmap/:dayId/remove-unrecorded-day", async (req, res) => {
   }
 });
 
-app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
+const ngRetrospectiveHolidayRoute = async (req, res) => {
   try {
-    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const { user } = req.ngSystemActor ? { user: req.ngSystemActor } : await requireLmsPermission(req, "lms.roadmap.manage");
     const sourceDb = await readLiveDb();
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const courseId = String(req.body.course_id || req.body.courseId || "").trim();
@@ -72481,6 +72481,227 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to apply recording-safe retrospective holiday" });
+  }
+};
+app.post("/admin/roadmap/:dayId/retrospective-holiday", ngRetrospectiveHolidayRoute);
+
+// ---------------------------------------------------------------------------
+// Automatic missed-class check. The day after each class (20 h after it
+// started) the LMS looks for evidence that it happened:
+//   - a recording in the LMS                         -> nothing to do
+//   - the Zoom meeting was never started AND the Zoom account has no cloud
+//     recording that day AND no notes/attendance     -> the existing
+//     retrospective holiday is applied (roadmap shifts forward; all of its
+//     safety stops apply), a backup is saved and admins get a WhatsApp alert
+//   - the meeting was held but nothing was recorded,
+//     or anything is uncertain                       -> no change, alert only
+// Only the last few days are checked and each day is handled once.
+const NEXTGEN_MISSED_CLASS_CHECK_ENABLED = String(process.env.NEXTGEN_MISSED_CLASS_CHECK_ENABLED || "true").toLowerCase() !== "false";
+const NEXTGEN_MISSED_CLASS_AUTO_HOLIDAY = String(process.env.NEXTGEN_MISSED_CLASS_AUTO_HOLIDAY || "true").toLowerCase() !== "false";
+const NEXTGEN_MISSED_CLASS_WAIT_HOURS = 20;
+const NEXTGEN_MISSED_CLASS_LOOKBACK_DAYS = 3;
+const NEXTGEN_MISSED_CLASS_ACTOR = { id: "system_missed_class_check", role: "admin", name: "Automatic class check" };
+let ngMissedClassCheckTimer = null;
+let ngMissedClassCheckRunning = false;
+
+function ngCallRouteInternally(handler, { params = {}, body = {}, actor = NEXTGEN_MISSED_CLASS_ACTOR } = {}) {
+  return new Promise((resolve) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(payload) { resolve({ http_status: this.statusCode, ...(payload || {}) }); return this; },
+    };
+    Promise.resolve(handler({ params, body, query: {}, headers: {}, ngSystemActor: actor }, res))
+      .catch((error) => resolve({ http_status: 500, success: false, error: error.message }));
+  });
+}
+
+async function ngZoomClassEvidenceForDate({ meetingId = "", dateKey = "", timezone = DEFAULT_TIMEZONE } = {}) {
+  const evidence = { meeting_known: false, meeting_held: null, account_recordings_that_day: null, errors: [] };
+  let token = null;
+  try {
+    token = await getZoomAccessToken();
+  } catch (error) {
+    evidence.errors.push("zoom_token: " + error.message);
+    return evidence;
+  }
+  if (hasRealZoomMeetingId(meetingId)) {
+    try {
+      const response = await axios.get(`https://api.zoom.us/v2/past_meetings/${encodeURIComponent(meetingId)}/instances`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      evidence.meeting_known = true;
+      evidence.meeting_held = (response.data?.meetings || []).some((meeting) =>
+        meeting?.start_time && ngDailySessionDateKey(new Date(meeting.start_time), timezone) === dateKey);
+    } catch (error) {
+      evidence.errors.push("past_meetings: " + (error.response?.data?.message || error.message));
+    }
+  } else {
+    evidence.errors.push("no_zoom_meeting_on_session");
+  }
+  try {
+    const response = await axios.get("https://api.zoom.us/v2/users/me/recordings", {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { from: dateKey, to: dateKey, page_size: 100 },
+    });
+    evidence.account_recordings_that_day = (response.data?.meetings || []).filter((meeting) =>
+      meeting?.start_time && ngDailySessionDateKey(new Date(meeting.start_time), timezone) === dateKey &&
+      Number(meeting.duration || 0) >= 15).length;
+  } catch (error) {
+    evidence.errors.push("account_recordings: " + (error.response?.data?.message || error.message));
+  }
+  return evidence;
+}
+
+function ngMissedClassCandidates(db = {}, now = new Date()) {
+  const rows = [];
+  for (const [courseId, roadmap] of Object.entries(db.roadmaps || {})) {
+    for (const day of Array.isArray(roadmap?.days) ? roadmap.days : []) {
+      if (!day?.id || ngRoadmapDayIsNoClass(day) || ngIsNoClassRoadmapDay(day)) continue;
+      const timezone = ngRoadmapTimezone(roadmap, day);
+      const dateKey = ngKnownScheduleDate(day.date || day.scheduled_date);
+      const today = ngDailySessionDateKey(now, timezone);
+      if (!dateKey || dateKey >= today || dateKey < ngDateKeyPlusDays(today, -NEXTGEN_MISSED_CLASS_LOOKBACK_DAYS)) continue;
+      const check = db.missedClassChecks?.[day.id];
+      if (check && check.final === true) continue;
+      const sessionId = String(day.live_session_id || day.session_id || "").trim();
+      const session = sessionId ? db.liveSessions?.[sessionId] || null : null;
+      const start = getSessionStartUtc(dateKey, session?.scheduled_time || ngRoadmapClassTime(roadmap, day), session?.scheduled_timezone || timezone);
+      if (!start || now.getTime() < start.getTime() + NEXTGEN_MISSED_CLASS_WAIT_HOURS * 3600 * 1000) continue;
+      rows.push({ courseId: String(roadmap.course_id || courseId), roadmap, day, dateKey, timezone, sessionId, session });
+    }
+  }
+  return rows;
+}
+
+async function ngRunMissedClassCheck({ dryRun = false, reason = "interval" } = {}) {
+  if (!NEXTGEN_MISSED_CLASS_CHECK_ENABLED) return { success: true, skipped: true, reason: "disabled" };
+  if (ngMissedClassCheckRunning) return { success: true, skipped: true, reason: "already_running" };
+  ngMissedClassCheckRunning = true;
+  const results = [];
+  try {
+    const db = await readLiveDb();
+    for (const item of ngMissedClassCandidates(db)) {
+      const { day, dateKey, timezone, sessionId, session, courseId } = item;
+      const title = day.title || "Class";
+      const recordingEvidence = ngRetrospectiveHolidayRecordingEntriesForDay(db, day, session || {})
+        .some(([, recording]) => ngRetrospectiveHolidayHasMediaEvidence(recording)) ||
+        Boolean(session && ngRetrospectiveHolidaySessionHasMediaEvidence(session));
+      const row = { day_id: day.id, course_id: courseId, date: dateKey, title, reason };
+      if (recordingEvidence) {
+        results.push({ ...row, outcome: "recorded" });
+        continue;
+      }
+      const zoom = await ngZoomClassEvidenceForDate({ meetingId: session?.zoom_meeting_id || session?.meeting_id || "", dateKey, timezone });
+      row.zoom = zoom;
+      const surelyNotHeld = zoom.meeting_known && zoom.meeting_held === false && zoom.account_recordings_that_day === 0;
+      if (!surelyNotHeld || !NEXTGEN_MISSED_CLASS_AUTO_HOLIDAY) {
+        row.outcome = zoom.meeting_held ? "held_without_recording" : "uncertain_without_recording";
+        row.alert_text = zoom.meeting_held
+          ? `⚠️ Class check: ${title} (${dateKey}) — the Zoom meeting was held but there is no recording or notes in the LMS. Please upload the recording, or mark the day as a holiday in Admin → Roadmap.`
+          : `⚠️ Class check: ${title} (${dateKey}) — no recording in the LMS and the system could not confirm whether the class happened. Nothing was changed. Please check, then upload the recording or mark the day as a holiday.`;
+        results.push(row);
+        continue;
+      }
+      const preview = await ngCallRouteInternally(ngRetrospectiveHolidayRoute, {
+        params: { dayId: day.id },
+        body: { course_id: courseId, dry_run: true },
+      });
+      if (!preview.success || preview.confirmation_required !== "APPLY_RECORDING_SAFE_HOLIDAY") {
+        row.outcome = "holiday_blocked";
+        row.blocked_by = preview.error || preview.confirmation_required || "preview_failed";
+        row.alert_text = `⚠️ Class check: ${title} (${dateKey}) — Zoom shows no class, but the holiday safety check stopped (${row.blocked_by}). Nothing was changed. Please review this day in Admin → Roadmap.`;
+        results.push(row);
+        continue;
+      }
+      if (dryRun) {
+        results.push({ ...row, outcome: "would_mark_holiday", days_shifted: preview.affected_existing_days, new_final_date: preview.new_final_date });
+        continue;
+      }
+      await ensureDataDir();
+      const backupDir = path.join(DATA_DIR, "backups");
+      await fs.mkdir(backupDir, { recursive: true });
+      const backupPath = path.join(backupDir, `live-session-db-before-auto-holiday-${dateKey}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+      await fs.writeFile(backupPath, JSON.stringify(await readLiveDb()), "utf8");
+      const applied = await ngCallRouteInternally(ngRetrospectiveHolidayRoute, {
+        params: { dayId: day.id },
+        body: { course_id: courseId, dry_run: false, confirm: "APPLY_RECORDING_SAFE_HOLIDAY", preview_token: preview.preview_token },
+      });
+      if (!applied.success) {
+        row.outcome = "holiday_failed";
+        row.error = applied.error || "apply_failed";
+        row.alert_text = `⚠️ Class check: ${title} (${dateKey}) — Zoom shows no class, but marking the holiday failed (${row.error}). Nothing was changed.`;
+      } else {
+        row.outcome = "marked_holiday";
+        row.backup_path = backupPath;
+        row.days_shifted = applied.affected_existing_days;
+        row.new_final_date = applied.new_final_date;
+        row.alert_text = `📅 Class check: no class on ${dateKey} (${title}). The Zoom meeting was never started and there is no recording or notes, so the LMS marked the day as a holiday and moved the remaining lessons forward by one class day (course now ends ${applied.new_final_date || "one class day later"}). If this is wrong, tell the tech team — a full backup was saved.`;
+      }
+      results.push(row);
+    }
+
+    if (!dryRun && results.length) {
+      const now = new Date().toISOString();
+      const alerts = results.filter((row) => row.alert_text);
+      if (alerts.length) {
+        try {
+          const crmDb = await readCrmDb();
+          for (const row of alerts) {
+            row.alert = await ngSendAdminWhatsAppAlert(crmDb, { type: "lms_missed_class_check", text: row.alert_text, meta: { day_id: row.day_id, date: row.date } });
+          }
+          await writeCrmDb(crmDb);
+        } catch (error) {
+          for (const row of alerts) row.alert_error = error.message;
+        }
+      }
+      const latest = await readLiveDb();
+      latest.missedClassChecks = { ...(latest.missedClassChecks || {}) };
+      for (const row of results) {
+        latest.missedClassChecks[row.day_id] = {
+          ...row,
+          alert: row.alert ? { sent: row.alert.sent || 0, reason: row.alert.reason || null } : null,
+          final: true,
+          checked_at: now,
+        };
+      }
+      await writeLiveDb(latest);
+    }
+    return { success: true, dry_run: dryRun, checked: results.length, results };
+  } catch (error) {
+    return { success: false, error: error.message, results };
+  } finally {
+    ngMissedClassCheckRunning = false;
+  }
+}
+
+function ngStartMissedClassCheckScheduler() {
+  if (!NEXTGEN_MISSED_CLASS_CHECK_ENABLED || ngMissedClassCheckTimer) return ngMissedClassCheckTimer;
+  ngMissedClassCheckTimer = setInterval(() => {
+    ngRunMissedClassCheck({ reason: "interval" }).catch((error) => console.error("Missed-class check failed:", error.message));
+  }, 60 * 60 * 1000);
+  if (typeof ngMissedClassCheckTimer.unref === "function") ngMissedClassCheckTimer.unref();
+  return ngMissedClassCheckTimer;
+}
+
+app.get("/admin/roadmap/missed-class-check", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const checks = Object.values(db.missedClassChecks || {}).sort((a, b) => String(b.date || "").localeCompare(String(a.date || ""))).slice(0, 50);
+    res.json({ success: true, enabled: NEXTGEN_MISSED_CLASS_CHECK_ENABLED, auto_holiday: NEXTGEN_MISSED_CLASS_AUTO_HOLIDAY, wait_hours: NEXTGEN_MISSED_CLASS_WAIT_HOURS, lookback_days: NEXTGEN_MISSED_CLASS_LOOKBACK_DAYS, checks });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Preview by default; dry_run:false runs the real check now.
+app.post("/admin/roadmap/missed-class-check/run", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.roadmap.manage");
+    res.json(await ngRunMissedClassCheck({ dryRun: req.body.dry_run !== false, reason: "manual_admin_run" }));
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
 
@@ -100831,6 +101052,7 @@ async function startNextgenServer() {
   ngStartWeakFlashcardAutomationScheduler();
   ngStartZoomRecordingRecoveryScheduler();
   ngStartAutoVimeoTransferScheduler();
+  ngStartMissedClassCheckScheduler();
   ngStartContentOperationsScheduler();
   ngStartAylaVimeoFolderSyncScheduler();
   ngStartAylaVimeoPlaybackReconciliationScheduler();
