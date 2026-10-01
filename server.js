@@ -16697,8 +16697,34 @@ app.get("/zoom/recordings", async (req, res) => {
         recording_type: videoFile?.recording_type || null,
         status: videoFile?.status || "completed",
         published: Boolean(saved.published),
+        vimeo_player_url: saved.vimeo_player_url || null,
       });
-    }).filter(Boolean);
+    }).filter(Boolean).map((row) => {
+      const saved = db.recordings?.[String(row.recording_key || "")] || {};
+      return { ...row, vimeo_link: saved.vimeo_link || null, on_vimeo: Boolean(saved.vimeo_link || saved.vimeo_player_url), source: "zoom" };
+    });
+
+    // Recordings already moved to Vimeo (and possibly removed from Zoom) for the
+    // same dates, so the admin list is complete. Only on the first page.
+    if (!nextPageToken) {
+      const listed = new Set(recordings.map((row) => String(row.recording_key || "")));
+      for (const [key, saved] of Object.entries(db.recordings || {})) {
+        if (listed.has(String(key)) || saved?.hidden_from_recordings === true) continue;
+        if (!saved?.vimeo_link && !saved?.vimeo_player_url) continue;
+        const day = String(saved.start_time || "").slice(0, 10);
+        if (!day || day < from || day > to) continue;
+        const row = sanitizePublicRecording({ ...saved, recording_key: saved.recording_key || key }, ngPublicRecordingNotesMeta(db, saved));
+        recordings.push({
+          ...row,
+          recording_url: saved.zoom_recording_url || saved.recording_url || saved.share_url || null,
+          download_url: saved.download_url || null,
+          vimeo_link: saved.vimeo_link || null,
+          on_vimeo: true,
+          source: "vimeo",
+        });
+      }
+      recordings.sort((a, b) => String(b.start_time || "").localeCompare(String(a.start_time || "")));
+    }
 
     res.json({
       success: true,
@@ -17939,6 +17965,9 @@ app.get("/live/leaderboard", async (req, res) => {
         || (viewerEmail && normalizeEmail(entry.email || entry.user_email || entry.student_email || "") === viewerEmail);
       if (viewerIsStaff || mine) return { ...entry, is_current_user: Boolean(mine) };
       const { email, user_email, student_email, ...rest } = entry;
+      for (const key of ["user_name", "name", "student_name", "display_name"]) {
+        if (String(rest[key] || "").includes("@")) rest[key] = "NextGen Student";
+      }
       return { ...rest, is_current_user: false };
     });
 
