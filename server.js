@@ -16701,7 +16701,9 @@ app.get("/zoom/recordings", async (req, res) => {
       });
     }).filter(Boolean).map((row) => {
       const saved = db.recordings?.[String(row.recording_key || "")] || {};
-      return { ...row, vimeo_link: saved.vimeo_link || null, on_vimeo: Boolean(saved.vimeo_link || saved.vimeo_player_url), source: "zoom" };
+      const transfer = db.recordingVimeoTransfers?.[String(row.recording_key || "")] || {};
+      const vimeoLink = saved.vimeo_link || (transfer.verified === true ? transfer.vimeo_link || null : null);
+      return { ...row, vimeo_link: vimeoLink, on_vimeo: Boolean(vimeoLink || saved.vimeo_player_url), source: "zoom" };
     });
 
     // Recordings already moved to Vimeo (and possibly removed from Zoom) for the
@@ -99363,7 +99365,7 @@ app.post("/admin/recordings/vimeo-transfer/refresh", async (req, res) => {
       } else if (check.value.error) {
         summary.failed.push({ recording_key: key, error: check.value.error });
       } else {
-        summary.processing.push({ recording_key: key, vimeo_status: check.value.vimeo_status, transcode: check.value.vimeo_transcode_status });
+        summary.processing.push({ recording_key: key, vimeo_status: check.value.vimeo_status, transcode: check.value.vimeo_transcode_status, vimeo_seconds: check.value.vimeo_duration_seconds, zoom_seconds: current.zoom_duration_seconds || null, start_time: current.start_time || null });
       }
       db.recordingVimeoTransfers[key] = next;
     });
