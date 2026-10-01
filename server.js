@@ -6298,10 +6298,16 @@ function findVideoFile(recordingFiles = []) {
   });
   if (!videos.length) return null;
 
+  // A view that was only on screen for a moment (e.g. a few seconds of screen
+  // share) produces a tiny file; never prefer it over the full-class file.
+  const largest = Math.max(...videos.map((file) => Number(file.file_size || 0)));
+  const fullLength = (file) => !largest || Number(file.file_size || 0) >= largest * 0.2;
+
   return videos.sort((a, b) => {
     const score = (file) => {
       const type = String(file.recording_type || "").toLowerCase();
       let value = 0;
+      if (!fullLength(file)) value -= 1000;
       if (type.includes("shared_screen_with_speaker_view")) value += 120;
       else if (type.includes("shared_screen_with_gallery_view")) value += 115;
       else if (type.includes("shared_screen")) value += 110;
