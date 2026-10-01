@@ -54,6 +54,9 @@ test("a transfer is verified only after transcoding completes with a matching du
   assert.match((await checkVimeoTransfer({ vimeoApi: video({ status: "quota_exceeded" }), transfer })).error, /quota_exceeded/);
   assert.equal((await checkVimeoTransfer({ vimeoApi: video({}), transfer: { ...transfer, zoom_duration_seconds: null } })).verified, true, "processed copy accepted when Zoom gives no length");
   assert.equal((await checkVimeoTransfer({ vimeoApi: video({ status: "transcoding", transcode: { status: "in_progress" } }), transfer: { ...transfer, zoom_duration_seconds: null } })).verified, false);
+  const empty = await checkVimeoTransfer({ vimeoApi: video({ duration: 4 }), transfer: { ...transfer, zoom_duration_seconds: 4980 } });
+  assert.equal(empty.verified, false);
+  assert.match(empty.error, /empty/, "an available but empty copy is marked failed so it can be retried");
   assert.equal(vimeoDurationMatches(82000, 82100), true);
   assert.equal(vimeoPlayerUrl({ uri: "/videos/5" }), "https://player.vimeo.com/video/5");
 });
