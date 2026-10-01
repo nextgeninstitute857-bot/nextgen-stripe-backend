@@ -5276,6 +5276,7 @@ function isPaidEnrollmentActive(enrollment = {}, plan = null, db = null) {
 }
 
 function ngApplyPaidAccessWindow(db = {}, enrollment = {}, { plan = null, paidAt = null, source = "paid_access", creditKey = "", alreadyCredited = false } = {}) {
+  const expiryBefore = enrollment.access_expires_at || null;
   if (!enrollment?.id) return enrollment;
   const resolvedPlan = plan || (enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null);
   const now = paidAt ? new Date(paidAt) : new Date();
@@ -5316,6 +5317,12 @@ function ngApplyPaidAccessWindow(db = {}, enrollment = {}, { plan = null, paidAt
     enrollment.access_expires_at = addDays(now, accessDays).toISOString();
   }
   enrollment.renewal_due_at = enrollment.access_expires_at;
+  // A new access window (e.g. a monthly renewal) gets its own 7/3/1-day reminders.
+  if (enrollment.access_expires_at !== expiryBefore && enrollment.billing_notifications_sent) {
+    const sent = { ...enrollment.billing_notifications_sent };
+    for (const key of ["renewal_7_days", "renewal_3_days", "renewal_1_days", "access_expired"]) delete sent[key];
+    enrollment.billing_notifications_sent = sent;
+  }
   enrollment.revoked_at = null;
   enrollment.revoked_reason = null;
   enrollment.billing_source = source;
