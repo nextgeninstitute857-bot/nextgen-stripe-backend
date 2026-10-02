@@ -89124,6 +89124,21 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       items = exactResources.map((resource) => aylaV189AssignmentSnapshot(db, resource));
       resourceIds = items.map((item) => String(item.resourceId));
     }
+    // Today's plan may already contain the same cards/resources (e.g. a due
+    // revision re-created the same weak-area card). Link the old task to that
+    // assignment instead of adding an "Overdue:" duplicate; finishing today's
+    // task then closes the old one too.
+    if (resourceIds.length && resourceIds.every((id) => reservedIds.has(String(id)))) {
+      const covering = assignments.find((row) => {
+        const ids = new Set(aylaCleanArray(row.resourceIds).map(String));
+        return resourceIds.every((id) => ids.has(String(id)));
+      });
+      if (covering) {
+        covering.linkedAssignmentIds = [...new Set([...aylaCleanArray(covering.linkedAssignmentIds).map(String), String(old.id)])];
+        assignedOverdueCount += 1;
+        continue;
+      }
+    }
     const carryMinutes = Math.max(5, aylaNumber(old.estimatedMinutes, 15));
     if (balancePolicy.enabled && !aylaRoadmapFitsWithin(plan.plannedMinutes, carryMinutes, priorityCarryCeiling)) continue;
     const carry = {
