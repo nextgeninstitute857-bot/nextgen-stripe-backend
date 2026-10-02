@@ -86829,6 +86829,7 @@ async function aylaV250EligibleQbankQuestions(db, student, {
   topic = "",
   limit = 24,
   seenQuestionIds = [],
+  destination = "roadmap",
 } = {}) {
   const destinationScope = aylaStudentCatalogDestinationScope(student);
   if (!contentRegistryStatus().configured) {
@@ -86859,7 +86860,7 @@ async function aylaV250EligibleQbankQuestions(db, student, {
       const collectionIds = await aylaPublishedQbankCollectionIds(db, {
         examTrack,
         sourceExamTrack,
-        destination: "roadmap",
+        destination,
         destinationScope,
       });
       const sourceRows = await listContentQbankQuestions({
@@ -89227,7 +89228,21 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       subsystem: assessmentDecision.subsystem || focusSubsystem,
       topic: assessmentDecision.topic || focusTopic,
     };
-    const smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, internal, date);
+    let smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, internal, date);
+    // Not enough AylaMed-owned questions for this focus: also use the banks
+    // students practise from in the QBank (e.g. UWorld, AMBOSS).
+    if (!smartAssessment && qbankEnabled) {
+      const qbankPool = await aylaV250EligibleQbankQuestions(db, student, {
+        date,
+        system: decision.system,
+        subsystem: decision.subsystem,
+        topic: decision.topic,
+        limit: 40,
+        destination: "qbank",
+      });
+      smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, qbankPool.questions || [], date);
+      if (smartAssessment) smartAssessment.verificationStatus = "assembled_from_published_qbank_mcqs";
+    }
     if (smartAssessment) {
       assessmentScheduled = Boolean(aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "assessment", [smartAssessment], smartAssessment.title || decision.label, {
         estimatedMinutes: smartAssessment.estimatedMinutes,
