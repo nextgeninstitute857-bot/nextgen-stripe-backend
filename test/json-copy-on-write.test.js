@@ -100,3 +100,28 @@ test("scoped drafts reject out-of-scope replacement and roll back declared chang
   }), /abort scoped mutation/);
   assert.equal(source.rows.r.status, "due");
 });
+
+test("plain values written by the mutator keep no draft proxies, so repeated writes stay fast", async () => {
+  const { types } = await import("node:util");
+  const hasProxy = (value, seen = new Set()) => {
+    if (!value || typeof value !== "object") return false;
+    if (types.isProxy(value)) return true;
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return Object.values(value).some((child) => hasProxy(child, seen));
+  };
+  let db = {
+    sessions: { s1: { id: "s1", questions: Array.from({ length: 40 }, (_, i) => ({ ref: `q${i}`, meta: { tags: ["a"] } })), answers: {} } },
+  };
+  // Same shape as recording a QBank answer: spread the drafted session into a new plain object.
+  for (let n = 0; n < 15; n += 1) {
+    const mutation = await mutateJsonCopyOnWrite(db, (draft) => {
+      const current = draft.sessions.s1;
+      draft.sessions.s1 = { ...current, answers: { ...current.answers, [`q${n}`]: { correct: true } } };
+    });
+    db = mutation.value;
+    assert.equal(hasProxy(db), false, `draft proxy left in the result after write ${n + 1}`);
+  }
+  assert.equal(Object.keys(db.sessions.s1.answers).length, 15);
+  assert.equal(db.sessions.s1.questions.length, 40);
+});
