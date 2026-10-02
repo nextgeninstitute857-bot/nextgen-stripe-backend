@@ -13983,7 +13983,7 @@ app.patch("/admin/demo/settings", async (req, res) => {
       ? ngApplyDemoSettingsToExistingEnrollments(db, {
           durationDays: db.demoSettings.duration_days,
           actorId: user.id,
-          applyToExpired: req.body.apply_to_expired_demos !== false,
+          applyToExpired: req.body.apply_to_expired_demos === true,
         })
       : { updated: 0, skipped: 0, duration_days: db.demoSettings.duration_days, demo_expiry: null };
 
@@ -13991,6 +13991,71 @@ app.patch("/admin/demo/settings", async (req, res) => {
     res.json({ success: true, demo_settings: db.demoSettings, existing_demo_update });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
 });
+
+// Repairs demo end dates that a demo-settings save overwrote (it used to re-open
+// demos that had already ended). Lists saved backups; with backup_file it
+// previews, and with confirm it restores the backup's end dates for demo
+// enrollments whose current end date equals bad_expiry. A fresh backup is
+// written first. Paid enrollments are never touched.
+app.post("/admin/demo/restore-expiries-from-backup", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    await ensureDataDir();
+    const backupDir = path.join(DATA_DIR, "backups");
+    const files = (await fs.readdir(backupDir).catch(() => []))
+      .filter((name) => /^live-session-db-.*\.json$/.test(name));
+    const listed = (await Promise.all(files.map(async (name) => {
+      const stat = await fs.stat(path.join(backupDir, name)).catch(() => null);
+      return stat ? { file: name, modified_at: stat.mtime.toISOString(), size_mb: Math.round(stat.size / 1048576) } : null;
+    }))).filter(Boolean).sort((a, b) => b.modified_at.localeCompare(a.modified_at));
+    const backupFile = path.basename(String(req.body.backup_file || ""));
+    if (!backupFile) return res.json({ success: true, backups: listed.slice(0, 30) });
+    if (!listed.some((row) => row.file === backupFile)) return res.status(404).json({ success: false, error: "Backup not found" });
+    const badExpiry = String(req.body.bad_expiry || "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(badExpiry)) return res.status(400).json({ success: false, error: "bad_expiry (YYYY-MM-DD) is required" });
+
+    const backup = JSON.parse(await fs.readFile(path.join(backupDir, backupFile), "utf8"));
+    const backupEnrollments = backup.enrollments || {};
+    const db = await readLiveDb();
+    const today = dateOnly(new Date());
+    const changes = [];
+    for (const enrollment of Object.values(db.enrollments || {})) {
+      if (enrollment?.is_demo !== true || String(enrollment.demo_expiry || "") !== badExpiry) continue;
+      const before = backupEnrollments[enrollment.id];
+      if (!before || before.is_demo !== true || !before.demo_expiry || before.demo_expiry === badExpiry) continue;
+      changes.push({ id: enrollment.id, email: enrollment.user_email || enrollment.email || null, from: badExpiry, to: before.demo_expiry, active_after: before.demo_expiry >= today, before });
+    }
+    const summary = {
+      backup_file: backupFile,
+      backup_modified_at: listed.find((row) => row.file === backupFile)?.modified_at || null,
+      demos_in_backup: Object.values(backupEnrollments).filter((row) => row?.is_demo === true).length,
+      demos_active_in_backup: Object.values(backupEnrollments).filter((row) => row?.is_demo === true && row.access_granted !== false && String(row.demo_expiry || "") >= today).length,
+      demos_to_restore: changes.length,
+      active_after_restore: changes.filter((row) => row.active_after).length,
+      sample: changes.slice(0, 8).map(({ before, ...row }) => row),
+    };
+    if (req.body.dry_run !== false) return res.json({ success: true, dry_run: true, ...summary });
+    if (String(req.body.confirm || "") !== "RESTORE_DEMO_EXPIRIES") return res.status(400).json({ success: false, error: "confirm must be RESTORE_DEMO_EXPIRIES", ...summary });
+
+    const safetyPath = path.join(backupDir, `live-session-db-before-demo-expiry-restore-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+    await fs.writeFile(safetyPath, JSON.stringify(db), "utf8");
+    const now = new Date().toISOString();
+    for (const change of changes) {
+      const enrollment = db.enrollments[change.id];
+      for (const key of ["demo_expiry", "expires_at", "access_expires_at", "access_days"]) {
+        if (change.before[key] !== undefined) enrollment[key] = change.before[key];
+      }
+      enrollment.demo_expiry_restored_at = now;
+      enrollment.demo_expiry_restored_by = user.id;
+      enrollment.updated_at = now;
+    }
+    await writeLiveDb(db);
+    return res.json({ success: true, dry_run: false, restored: changes.length, safety_backup: path.basename(safetyPath), ...summary });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 
 app.get("/admin/points/audit", async (req, res) => {
   try {
