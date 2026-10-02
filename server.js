@@ -86829,6 +86829,7 @@ async function aylaV250EligibleQbankQuestions(db, student, {
   topic = "",
   limit = 24,
   seenQuestionIds = [],
+  destination = "roadmap",
 } = {}) {
   const destinationScope = aylaStudentCatalogDestinationScope(student);
   if (!contentRegistryStatus().configured) {
@@ -86859,7 +86860,7 @@ async function aylaV250EligibleQbankQuestions(db, student, {
       const collectionIds = await aylaPublishedQbankCollectionIds(db, {
         examTrack,
         sourceExamTrack,
-        destination: "roadmap",
+        destination,
         destinationScope,
       });
       const sourceRows = await listContentQbankQuestions({
@@ -89124,6 +89125,21 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       items = exactResources.map((resource) => aylaV189AssignmentSnapshot(db, resource));
       resourceIds = items.map((item) => String(item.resourceId));
     }
+    // Today's plan may already contain the same cards/resources (e.g. a due
+    // revision re-created the same weak-area card). Link the old task to that
+    // assignment instead of adding an "Overdue:" duplicate; finishing today's
+    // task then closes the old one too.
+    if (resourceIds.length && resourceIds.every((id) => reservedIds.has(String(id)))) {
+      const covering = assignments.find((row) => {
+        const ids = new Set(aylaCleanArray(row.resourceIds).map(String));
+        return resourceIds.every((id) => ids.has(String(id)));
+      });
+      if (covering) {
+        covering.linkedAssignmentIds = [...new Set([...aylaCleanArray(covering.linkedAssignmentIds).map(String), String(old.id)])];
+        assignedOverdueCount += 1;
+        continue;
+      }
+    }
     const carryMinutes = Math.max(5, aylaNumber(old.estimatedMinutes, 15));
     if (balancePolicy.enabled && !aylaRoadmapFitsWithin(plan.plannedMinutes, carryMinutes, priorityCarryCeiling)) continue;
     const carry = {
@@ -89212,7 +89228,21 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       subsystem: assessmentDecision.subsystem || focusSubsystem,
       topic: assessmentDecision.topic || focusTopic,
     };
-    const smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, internal, date);
+    let smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, internal, date);
+    // Not enough AylaMed-owned questions for this focus: also use the banks
+    // students practise from in the QBank (e.g. UWorld, AMBOSS).
+    if (!smartAssessment && qbankEnabled) {
+      const qbankPool = await aylaV250EligibleQbankQuestions(db, student, {
+        date,
+        system: decision.system,
+        subsystem: decision.subsystem,
+        topic: decision.topic,
+        limit: 40,
+        destination: "qbank",
+      });
+      smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, qbankPool.questions || [], date);
+      if (smartAssessment) smartAssessment.verificationStatus = "assembled_from_published_qbank_mcqs";
+    }
     if (smartAssessment) {
       assessmentScheduled = Boolean(aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "assessment", [smartAssessment], smartAssessment.title || decision.label, {
         estimatedMinutes: smartAssessment.estimatedMinutes,
@@ -89237,7 +89267,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       || Math.max(1, Math.min(12, Math.round((effectiveCapacity / 45) * questionVolumeFactor)));
     const pick = select(internal, internalQuestionLimit);
     if (pick.length) {
-      const assignment = aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
+      const assignment = aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `${pick.length} practice question${pick.length === 1 ? "" : "s"} — ${focusSystem || "Mixed review"}${focusTopic && aylaV189MappingKey(focusTopic) !== aylaV189MappingKey(focusSystem) ? `: ${focusTopic}` : ""}`, {
       estimatedMinutes: pick.length * balancePolicy.questionMinutesPerItem,
       system: focusSystem,
       subsystem: focusSubsystem,
