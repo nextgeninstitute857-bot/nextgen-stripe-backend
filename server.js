@@ -72574,7 +72574,7 @@ function ngMissedClassCandidates(db = {}, now = new Date()) {
       const today = ngDailySessionDateKey(now, timezone);
       if (!dateKey || dateKey >= today || dateKey < ngDateKeyPlusDays(today, -NEXTGEN_MISSED_CLASS_LOOKBACK_DAYS)) continue;
       const check = db.missedClassChecks?.[day.id];
-      if (check && check.final === true) continue;
+      if (check && check.final === true && check.outcome !== "uncertain_without_recording") continue;
       const sessionId = String(day.live_session_id || day.session_id || "").trim();
       const session = sessionId ? db.liveSessions?.[sessionId] || null : null;
       const start = getSessionStartUtc(dateKey, session?.scheduled_time || ngRoadmapClassTime(roadmap, day), session?.scheduled_timezone || timezone);
