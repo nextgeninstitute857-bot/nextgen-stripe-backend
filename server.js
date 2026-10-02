@@ -72505,7 +72505,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", ngRetrospectiveHolidayRo
 // Only the last few days are checked and each day is handled once.
 const NEXTGEN_MISSED_CLASS_CHECK_ENABLED = String(process.env.NEXTGEN_MISSED_CLASS_CHECK_ENABLED || "true").toLowerCase() !== "false";
 const NEXTGEN_MISSED_CLASS_AUTO_HOLIDAY = String(process.env.NEXTGEN_MISSED_CLASS_AUTO_HOLIDAY || "true").toLowerCase() !== "false";
-const NEXTGEN_MISSED_CLASS_WAIT_HOURS = 20;
+const NEXTGEN_MISSED_CLASS_WAIT_HOURS = 10;
 const NEXTGEN_MISSED_CLASS_LOOKBACK_DAYS = 3;
 const NEXTGEN_MISSED_CLASS_ACTOR = { id: "system_missed_class_check", role: "admin", name: "Automatic class check" };
 let ngMissedClassCheckTimer = null;
@@ -72611,6 +72611,8 @@ async function ngRunMissedClassCheck({ dryRun = false, reason = "interval" } = {
         row.alert_text = zoom.meeting_held
           ? `⚠️ Class check: ${title} (${dateKey}) — the Zoom meeting was held but there is no recording or notes in the LMS. Please upload the recording, or mark the day as a holiday in Admin → Roadmap.`
           : `⚠️ Class check: ${title} (${dateKey}) — no recording in the LMS and the system could not confirm whether the class happened. Nothing was changed. Please check, then upload the recording or mark the day as a holiday.`;
+        // Re-checking a day that was already unsure: don't send the same WhatsApp again.
+        if (db.missedClassChecks?.[day.id]?.outcome === row.outcome) delete row.alert_text;
         results.push(row);
         continue;
       }
@@ -72672,7 +72674,7 @@ async function ngRunMissedClassCheck({ dryRun = false, reason = "interval" } = {
         latest.missedClassChecks[row.day_id] = {
           ...row,
           alert: row.alert ? { sent: row.alert.sent || 0, reason: row.alert.reason || null } : null,
-          final: true,
+          final: row.outcome !== "uncertain_without_recording",
           checked_at: now,
         };
       }
