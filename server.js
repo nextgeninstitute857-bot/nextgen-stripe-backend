@@ -14733,6 +14733,66 @@ app.delete("/admin/enrollments/:enrollmentId", async (req, res) => {
   }
 });
 
+// Gives back access that was revoked from the admin Enrollments list.
+app.post("/admin/enrollments/:enrollmentId/restore", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const enrollment = findEnrollmentById(db, req.params.enrollmentId);
+    if (!enrollment) return res.status(404).json({ success: false, error: "Enrollment not found" });
+    enrollment.access_granted = true;
+    enrollment.revoked_at = null;
+    enrollment.revoked_reason = null;
+    enrollment.restored_at = new Date().toISOString();
+    enrollment.updated_at = new Date().toISOString();
+    db.enrollments[enrollment.id] = enrollment;
+    await writeLiveDb(db);
+    res.json({ success: true, enrollment: sanitizeAdminEnrollment(enrollment, db), message: "Enrollment access restored" });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to restore enrollment" });
+  }
+});
+
+// Permanently removes a student: their account and every enrollment, so they
+// can no longer sign in. Payment records are kept for accounting. A backup of
+// the database is written first. Admin and staff accounts cannot be deleted here.
+app.delete("/admin/students/:userId", async (req, res) => {
+  try {
+    const { user: actor } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const userId = String(req.params.userId || "");
+    const student = db.users?.[userId] || null;
+    if (!student) return res.status(404).json({ success: false, error: "Student not found" });
+    if (String(student.role || "student") !== "student") return res.status(400).json({ success: false, error: "Only student accounts can be deleted here" });
+    if (actor?.id && String(actor.id) === userId) return res.status(400).json({ success: false, error: "You cannot delete your own account" });
+
+    await ensureDataDir();
+    const backupDir = path.join(DATA_DIR, "backups");
+    await fs.mkdir(backupDir, { recursive: true });
+    const backupName = `live-session-db-before-student-delete-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    await fs.writeFile(path.join(backupDir, backupName), JSON.stringify(db), "utf8");
+
+    const removedEnrollments = [];
+    for (const [key, enrollment] of Object.entries(db.enrollments || {})) {
+      if (String(enrollment?.user_id || "") !== userId) continue;
+      removedEnrollments.push(enrollment.id || key);
+      delete db.enrollments[key];
+    }
+    delete db.users[userId];
+    await writeLiveDb(db);
+    res.json({
+      success: true,
+      deleted_student: { id: userId, email: student.email || null, name: student.name || null },
+      deleted_enrollments: removedEnrollments.length,
+      backup: backupName,
+      message: "Student deleted",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to delete student" });
+  }
+});
+
+
 app.get("/admin/payments", async (req, res) => {
   try {
     await requireAdmin(req);
