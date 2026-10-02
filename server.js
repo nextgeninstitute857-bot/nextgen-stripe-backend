@@ -89267,7 +89267,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       || Math.max(1, Math.min(12, Math.round((effectiveCapacity / 45) * questionVolumeFactor)));
     const pick = select(internal, internalQuestionLimit);
     if (pick.length) {
-      const assignment = aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
+      const assignment = aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `${pick.length} practice question${pick.length === 1 ? "" : "s"} — ${focusSystem || "Mixed review"}${focusTopic && aylaV189MappingKey(focusTopic) !== aylaV189MappingKey(focusSystem) ? `: ${focusTopic}` : ""}`, {
       estimatedMinutes: pick.length * balancePolicy.questionMinutesPerItem,
       system: focusSystem,
       subsystem: focusSubsystem,
