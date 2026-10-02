@@ -72208,7 +72208,11 @@ const ngRetrospectiveHolidayRoute = async (req, res) => {
 
     // A missing video does not prove that no teaching occurred. Never silently
     // turn published notes or attended classes into a holiday from the date picker.
-    if (!selectedHasRecording && (selectedHasSubstantiveNotes || selectedAttendanceCount > 0)) {
+    // The automatic missed-class check may pass Zoom's confirmation that the meeting
+    // was never started. Then "Join" clicks recorded as attendance are not evidence
+    // that teaching happened (the rows are kept, not deleted). Notes still block.
+    const zoomConfirmedNotHeld = Boolean(req.ngSystemActor) && req.body.zoom_confirmed_not_held === true;
+    if (!selectedHasRecording && (selectedHasSubstantiveNotes || (selectedAttendanceCount > 0 && !zoomConfirmedNotHeld))) {
       return res.status(409).json({ success: false, error: "Safety stop: this date has published/substantive notes or attendance. Review the session before marking it as a holiday; nothing was changed." });
     }
 
@@ -72618,7 +72622,7 @@ async function ngRunMissedClassCheck({ dryRun = false, reason = "interval" } = {
       }
       const preview = await ngCallRouteInternally(ngRetrospectiveHolidayRoute, {
         params: { dayId: day.id },
-        body: { course_id: courseId, dry_run: true },
+        body: { course_id: courseId, dry_run: true, zoom_confirmed_not_held: true },
       });
       if (!preview.success || preview.confirmation_required !== "APPLY_RECORDING_SAFE_HOLIDAY") {
         row.outcome = "holiday_blocked";
@@ -72638,7 +72642,7 @@ async function ngRunMissedClassCheck({ dryRun = false, reason = "interval" } = {
       await fs.writeFile(backupPath, JSON.stringify(await readLiveDb()), "utf8");
       const applied = await ngCallRouteInternally(ngRetrospectiveHolidayRoute, {
         params: { dayId: day.id },
-        body: { course_id: courseId, dry_run: false, confirm: "APPLY_RECORDING_SAFE_HOLIDAY", preview_token: preview.preview_token },
+        body: { course_id: courseId, dry_run: false, confirm: "APPLY_RECORDING_SAFE_HOLIDAY", preview_token: preview.preview_token, zoom_confirmed_not_held: true },
       });
       if (!applied.success) {
         row.outcome = "holiday_failed";
