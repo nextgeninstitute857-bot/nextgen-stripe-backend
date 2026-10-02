@@ -72459,6 +72459,18 @@ const ngRetrospectiveHolidayRoute = async (req, res) => {
     ngSyncRoadmapSequenceMetadata(workingDb, roadmap, { actorId: user.id });
     ngSyncLinkedLiveSessionsForRoadmap(workingDb, roadmap, { actorId: user.id });
 
+    // Recordings on shifted days keep their video and links but take the new
+    // lesson title, so a class held after the holiday is labelled correctly.
+    for (const row of anchors.filter((item) => item.recording_anchor && item.session_id)) {
+      const shiftedSession = workingDb.liveSessions?.[row.session_id];
+      const newTitle = shiftedSession?.topic || shiftedSession?.title || "";
+      if (!newTitle) continue;
+      for (const [key, recording] of Object.entries(workingDb.recordings || {})) {
+        if (String(recording?.session_id || "") !== String(row.session_id) || recording.label_correction_locked === true) continue;
+        if (recording.topic === newTitle) continue;
+        workingDb.recordings[key] = { ...recording, topic: newTitle, updated_at: new Date().toISOString() };
+      }
+    }
     for (const [id, before] of Object.entries(recordingBefore)) {
       if (!workingDb.recordings?.[id] || !protectedSnapshotsEqual(before, protectedIdentityAndUrls(workingDb.recordings[id]))) {
         return res.status(409).json({ success: false, error: `Safety stop: recording attachment changed for ${id}. Nothing was saved.` });
