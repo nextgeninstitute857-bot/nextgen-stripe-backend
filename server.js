@@ -81806,6 +81806,22 @@ app.post("/api/ayla/enrollments/:id/extend", async (req, res) => {
       access_unit: req.body.access_unit || req.body.duration_unit || "day",
     };
     const windowMode = String(req.body.access_window_mode || req.body.access_mode || "extend").trim().toLowerCase();
+    if (windowMode === "reduce") {
+      if (!enrollment.access_expires_at) return aylaSendError(res, 400, "This access never expires. Use 'Start from now' to give it an end date first.");
+      const currentExpiry = new Date(enrollment.access_expires_at);
+      const span = aylaResolveAdminAccessWindow(payload, currentExpiry);
+      const reducedMs = currentExpiry.getTime() - (new Date(span.expires_at).getTime() - currentExpiry.getTime());
+      const nextExpiry = new Date(Math.max(reducedMs, Date.now()));
+      const startedAt = new Date(enrollment.access_starts_at || enrollment.createdAt || Date.now());
+      enrollment.access_expires_at = nextExpiry.toISOString();
+      enrollment.access_days = Math.max(1, Math.ceil((nextExpiry.getTime() - startedAt.getTime()) / 86400000));
+      enrollment.access_expiry_mode = "admin_timed";
+      enrollment.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaEnrollments", enrollment);
+      await aylaAccessLog(db, "admin_reduce_access", { enrollmentId: enrollment.id, reducedBy: span.duration_label, newExpiry: enrollment.access_expires_at });
+      await writeAylaDb(db);
+      return aylaSendOk(res, { enrollment, payment: null, access_report: { reduced_by: span.duration_label, expires_at: enrollment.access_expires_at, ended_now: reducedMs <= Date.now() } });
+    }
     const accessWindow = aylaResolveAdminAccessWindow(payload, windowMode === "replace" ? new Date() : base);
     enrollment.access_starts_at = windowMode === "replace" ? accessWindow.starts_at : (enrollment.access_starts_at || accessWindow.starts_at);
     enrollment.access_expires_at = accessWindow.expires_at;
@@ -100557,6 +100573,42 @@ async function ngAdminMobileInviteLms(req, body = {}) {
   };
 }
 
+// Each exam has its own AylaMed website (aylamedapp.com is USMLE only). The
+// sign-in email names that exam, links to its site, and is sent from that
+// exam's sender: AYLA_<SITE>_EMAIL_FROM when set (e.g. AYLA_MCCQE_EMAIL_FROM),
+// otherwise the AylaMed address with the exam in the sender name.
+function ngAylaExamSiteForTrack(examTrackId = "") {
+  const sites = listAylaExamSites(process.env);
+  const track = normalizeAylaShellExamTrack(examTrackId);
+  const site = sites.find((row) => row.exam_track_id === track) || sites.find((row) => row.site_id === "usmle");
+  const siteId = site?.site_id || "usmle";
+  return { siteId, name: siteId.toUpperCase(), loginUrl: aylaExamLoginUrl(site?.exam_track_id || "usmle_step_1", process.env) };
+}
+
+function ngAylaExamEmailFrom(siteId = "usmle") {
+  const configured = String(process.env[`AYLA_${String(siteId).toUpperCase()}_EMAIL_FROM`] || "").trim();
+  if (configured) return configured;
+  const base = ngAylaEmailFromAddress();
+  return `AylaMed ${String(siteId).toUpperCase()} <${extractEmailAddress(base)}>`;
+}
+
+// Websites for every exam this user currently has access to, the given exam first.
+function ngAylaUserExamSites(db, userId, examTrackId = "") {
+  const tracks = [examTrackId];
+  for (const enrollment of aylaValues(db || {}, "aylaEnrollments")) {
+    if (String(enrollment?.user_id || enrollment?.ayla_user_id || "") !== String(userId || "")) continue;
+    if (enrollment.access_granted === false) continue;
+    if (enrollment.access_expires_at && new Date(enrollment.access_expires_at).getTime() < Date.now()) continue;
+    tracks.push(enrollment.exam_track_id || enrollment.examTrackId || "");
+  }
+  const seen = new Map();
+  for (const track of tracks.filter(Boolean)) {
+    const site = ngAylaExamSiteForTrack(track);
+    if (!seen.has(site.siteId)) seen.set(site.siteId, site);
+  }
+  return [...seen.values()];
+}
+
 async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessReport = null, examTrackId = "", sendEmail = true, existingAccount = false, requireAcceptedDelivery = false, privateMccqeLeadId = null } = {}) {
   if (!sendEmail) return { attempted: false, sent: false, skipped: true, reason: "send_email_disabled" };
   if (!temporaryPassword && !existingAccount) throw new Error("A temporary password is required for an AylaMed access invitation");
@@ -100564,14 +100616,18 @@ async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", a
   const accessLine = accessReport?.preserved === true && accessReport?.expires_at
     ? `Your AylaMed access is active until ${new Date(accessReport.expires_at).toUTCString()}.`
     : `Your AylaMed access is ready for ${accessReport?.duration_label || "30 days"}.`;
-  const loginUrl = aylaExamLoginUrl(examTrackId, process.env);
+  const primarySite = examTrackId ? ngAylaExamSiteForTrack(examTrackId) : null;
+  const loginUrl = primarySite?.loginUrl || aylaExamLoginUrl(examTrackId, process.env);
+  const otherSites = db && user?.id ? ngAylaUserExamSites(db, user.id, examTrackId).filter((site) => site.siteId !== primarySite?.siteId) : [];
+  const productName = primarySite ? `AylaMed ${primarySite.name}` : "AylaMed";
   const lines = [
     `Hi ${studentName},`,
     "",
     accessLine,
     "",
-    "Open AylaMed:",
+    `Open ${productName}:`,
     loginUrl,
+    ...(otherSites.length ? ["", "You also have access to:", ...otherSites.map((site) => `AylaMed ${site.name}: ${site.loginUrl}`)] : []),
     "",
     "Email:",
     user.email,
@@ -100587,7 +100643,8 @@ async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", a
   try {
     const provider = await sendEmailMessage({
       to: user.email,
-      subject: "Your AylaMed access is ready",
+      subject: `Your ${productName} access is ready`,
+      ...(primarySite ? { from: ngAylaExamEmailFrom(primarySite.siteId) } : {}),
       text: lines.join("\n"),
       transport: "aylamed",
       brand: "aylamed",
