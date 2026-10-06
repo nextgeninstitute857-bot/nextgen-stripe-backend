@@ -45958,6 +45958,7 @@ async function aylaSelectQbankSessionQuestions({
         difficulty: filters.difficulty,
         selectionPaths: filters.selection_paths,
         status: filters.status || "all",
+        qids: filters.qids,
         history,
         sourceProfile,
         destinationScope,
