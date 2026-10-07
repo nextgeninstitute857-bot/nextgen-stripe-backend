@@ -70904,7 +70904,9 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
     const lockedRecording = Object.values(db.recordings || {}).find((recording) => {
       return laterDayIds.has(String(recording?.roadmap_day_id || "")) || laterSessionIds.has(String(recording?.session_id || ""));
     });
+    const ngStaffRoles = new Set(["admin", "super_admin", "instructor", "tutor"]);
     const lockedAttendance = Object.values(db.attendance || {}).find((attendance) => {
+      if (ngStaffRoles.has(String(db.users?.[String(attendance?.user_id || "")]?.role || "").toLowerCase())) return false;
       return laterDayIds.has(String(attendance?.roadmap_day_id || attendance?.day_id || "")) ||
         laterSessionIds.has(String(attendance?.session_id || attendance?.live_session_id || ""));
     });
@@ -70913,6 +70915,7 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       return res.status(409).json({
         success: false,
         error: "Safety stop: a later system has already started or has attendance/recording data, so its schedule was not moved",
+        locked_reason: alreadyStartedDay ? "day_already_reached" : lockedSession ? "session_started_or_recorded" : lockedRecording ? "recording_linked" : "student_attendance",
         locked_roadmap_day_id: alreadyStartedDay?.id || lockedSession?.roadmap_day_id || lockedRecording?.roadmap_day_id || lockedAttendance?.roadmap_day_id || null,
         locked_session_id: lockedSession?.id || lockedRecording?.session_id || lockedAttendance?.session_id || null,
       });
