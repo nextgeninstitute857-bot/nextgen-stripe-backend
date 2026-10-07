@@ -70922,6 +70922,13 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
         success: false,
         error: "Safety stop: a later system has already started or has attendance/recording data, so its schedule was not moved",
         locked_reason: alreadyStartedDay ? "day_already_reached" : lockedSession ? "session_started_or_recorded" : lockedRecording ? "recording_linked" : "student_attendance",
+        locked_attendance: lockedAttendance && !alreadyStartedDay && !lockedSession && !lockedRecording ? {
+          user_id: lockedAttendance.user_id || null,
+          user_role: db.users?.[String(lockedAttendance.user_id || "")]?.role || "unknown_user",
+          date: lockedAttendance.date || null,
+          source: lockedAttendance.source || null,
+          marked_at: lockedAttendance.marked_at || null,
+        } : undefined,
         locked_roadmap_day_id: alreadyStartedDay?.id || lockedSession?.roadmap_day_id || lockedRecording?.roadmap_day_id || lockedAttendance?.roadmap_day_id || null,
         locked_session_id: lockedSession?.id || lockedRecording?.session_id || lockedAttendance?.session_id || null,
       });
