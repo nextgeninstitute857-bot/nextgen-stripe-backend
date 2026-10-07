@@ -70913,6 +70913,12 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
     const ngStaffRoles = new Set(["admin", "super_admin", "instructor", "tutor"]);
     const lockedAttendance = Object.values(db.attendance || {}).find((attendance) => {
       if (ngStaffRoles.has(String(db.users?.[String(attendance?.user_id || "")]?.role || "").toLowerCase())) return false;
+      // Marked before the session's own date: the student opened an earlier class
+      // that was later made a holiday and moved here, so it is not this class.
+      const attendedSession = db.liveSessions?.[String(attendance?.session_id || attendance?.live_session_id || "")] || null;
+      const sessionDate = String(attendedSession?.scheduled_date || attendedSession?.date || "").slice(0, 10);
+      const attendanceDate = String(attendance?.date || attendance?.marked_at || "").slice(0, 10);
+      if (sessionDate && attendanceDate && attendanceDate < sessionDate) return false;
       return laterDayIds.has(String(attendance?.roadmap_day_id || attendance?.day_id || "")) ||
         laterSessionIds.has(String(attendance?.session_id || attendance?.live_session_id || ""));
     });
