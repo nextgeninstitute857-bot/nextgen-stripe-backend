@@ -101284,7 +101284,9 @@ app.post("/admin/mobile/invitations", async (req, res) => {
     }
     const success = errors.length === 0;
     const status = success ? 201 : results.length ? 207 : Math.max(...errors.map((item) => item.status || 500));
-    return res.status(status).json({ success, partial_success: results.length > 0 && errors.length > 0, results, errors });
+    // `error` carries the failure reason so web and phone admins see it, not just "Request failed (400)".
+    const error = success ? undefined : errors.map((item) => item.error).filter(Boolean).join(" ") || "Failed to create access invitation";
+    return res.status(status).json({ success, partial_success: results.length > 0 && errors.length > 0, results, errors, error });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to create access invitation" });
   }

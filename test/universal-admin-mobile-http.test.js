@@ -194,6 +194,7 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     });
     assert.equal(unassignedNclexVariant.response.status, 400, JSON.stringify(unassignedNclexVariant.payload));
     assert.match(unassignedNclexVariant.payload.errors?.[0]?.error, /NCLEX-RN or NCLEX-PN/i);
+    assert.match(unassignedNclexVariant.payload.error, /NCLEX-RN or NCLEX-PN/i);
 
     const aylaInvite = await api(baseUrl, "/admin/mobile/invitations", {
       method: "POST",
