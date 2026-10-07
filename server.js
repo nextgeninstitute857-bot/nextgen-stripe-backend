@@ -71063,9 +71063,16 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       const remainingExtensionDays = meaningfulDays.slice(reusedEntries.length).map(clone);
       for (const day of remainingExtensionDays) finalExtensionDayIds.push(String(day.id));
       const restoredPackets = displacedReplacementDays.map(clone);
-      const insertionPoint = reusedEntries.length
+      let insertionPoint = reusedEntries.length
         ? Math.max(...reusedEntries.map((item) => targetRoadmap.days.findIndex((day) => String(day.id || "") === String(item.day.id)))) + 1
         : insertionIndex;
+      // A holiday dated today or earlier already happened: keep it on its date and
+      // add the new teaching days after it rather than pushing it later.
+      while (
+        insertionPoint < targetRoadmap.days.length &&
+        ngRoadmapDayIsNoClass(targetRoadmap.days[insertionPoint]) &&
+        String(targetRoadmap.days[insertionPoint].date || targetRoadmap.days[insertionPoint].scheduled_date || "").slice(0, 10) <= today
+      ) insertionPoint += 1;
       targetRoadmap.days.splice(insertionPoint, 0, ...remainingExtensionDays, ...restoredPackets);
 
       return {
