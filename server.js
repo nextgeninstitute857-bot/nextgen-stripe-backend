@@ -81793,6 +81793,33 @@ app.post("/api/ayla/enrollments/:id/restore", async (req, res) => {
   }
 });
 
+// Removes a student from every AylaMed exam in one step. Learning history is kept, and each exam can be restored later.
+app.post("/api/ayla/enrollments/revoke-all", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const email = aylaNormalizeEmail(req.body.email || "");
+    const user = req.body.user_id ? aylaGetItem(db, "aylaUsers", req.body.user_id) : email ? aylaFindUserByEmail(db, email) : null;
+    if (!user) return aylaSendError(res, 404, "AylaMed student not found");
+    const now = aylaNow();
+    const reason = req.body.reason || "admin_revoked_all";
+    const revoked = aylaValues(db, "aylaEnrollments")
+      .filter((enrollment) => String(enrollment.user_id || enrollment.ayla_user_id || "") === String(user.id))
+      .filter((enrollment) => String(enrollment.status || "").toLowerCase() !== "revoked")
+      .map((enrollment) => {
+        const updated = { ...enrollment, access_granted: false, status: "revoked", revoked_at: now, revoked_reason: reason, updatedAt: now };
+        aylaSetItem(db, "aylaEnrollments", updated);
+        return updated;
+      });
+    await aylaAccessLog(db, "admin_revoke_all_access", { userId: user.id, enrollmentIds: revoked.map((enrollment) => enrollment.id), reason });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { user_id: user.id, revoked_count: revoked.length, enrollments: revoked });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to remove AylaMed access");
+  }
+});
+
 app.post("/api/ayla/enrollments/:id/extend", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
@@ -82130,6 +82157,7 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /api/ayla/billing/create-checkout",
       "POST /api/ayla/enrollments/grant-access",
       "POST /api/ayla/enrollments/:id/revoke",
+      "POST /api/ayla/enrollments/revoke-all",
       "POST /api/ayla/enrollments/:id/restore",
       "POST /api/ayla/enrollments/:id/extend",
       "POST /api/ayla/diagnostic-submissions",

@@ -329,6 +329,19 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     assert.equal(upgraded.payload.enrollment.total_recorded_amount_cents, 3250);
     assert.equal(upgraded.payload.payment.amount_cents, 2000);
 
+    const removedEverywhere = await api(baseUrl, "/api/ayla/enrollments/revoke-all", {
+      method: "POST",
+      token,
+      body: { email: "ayla@example.com" },
+    });
+    assert.equal(removedEverywhere.response.status, 200, JSON.stringify(removedEverywhere.payload));
+    assert.ok(removedEverywhere.payload.revoked_count >= 1);
+    assert.ok(removedEverywhere.payload.enrollments.every((row) => row.status === "revoked" && row.access_granted === false));
+    const removedAgain = await api(baseUrl, "/api/ayla/enrollments/revoke-all", { method: "POST", token, body: { email: "ayla@example.com" } });
+    assert.equal(removedAgain.payload.revoked_count, 0);
+    const removedUnknown = await api(baseUrl, "/api/ayla/enrollments/revoke-all", { method: "POST", token, body: { email: "nobody@example.com" } });
+    assert.equal(removedUnknown.response.status, 404);
+
     const updatedDashboard = await api(baseUrl, "/admin/mobile/dashboard", { token });
     assert.equal(updatedDashboard.payload.aylamed.revenue.monthly_sales_cents, 8250);
     assert.equal(updatedDashboard.payload.aylamed.revenue.total_collected_cents, 8250);
