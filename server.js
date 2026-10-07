@@ -100638,7 +100638,7 @@ function ngAylaUserExamSites(db, userId, examTrackId = "") {
   return [...seen.values()];
 }
 
-async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessReport = null, examTrackId = "", sendEmail = true, existingAccount = false, requireAcceptedDelivery = false, privateMccqeLeadId = null } = {}) {
+async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessReport = null, examTrackId = "", examVariant = "", sendEmail = true, existingAccount = false, requireAcceptedDelivery = false, privateMccqeLeadId = null } = {}) {
   if (!sendEmail) return { attempted: false, sent: false, skipped: true, reason: "send_email_disabled" };
   if (!temporaryPassword && !existingAccount) throw new Error("A temporary password is required for an AylaMed access invitation");
   const studentName = String(user.name || "Doctor").trim() || "Doctor";
@@ -100649,9 +100649,15 @@ async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", a
   const loginUrl = primarySite?.loginUrl || aylaExamLoginUrl(examTrackId, process.env);
   const otherSites = db && user?.id ? ngAylaUserExamSites(db, user.id, examTrackId).filter((site) => site.siteId !== primarySite?.siteId) : [];
   const productName = primarySite ? `AylaMed ${primarySite.name}` : "AylaMed";
+  // The exact exam ("USMLE Step 2 CK", "NCLEX-RN"), since one site can serve several exams.
+  const canonicalExam = aylaCanonicalExamTrack(examTrackId);
+  const examName = canonicalExam === "nclex" && examVariant
+    ? aylaNclexVariantLabel(examVariant)
+    : AYLA_EXAM_REGISTRY[canonicalExam]?.label || "";
   const lines = [
     `Hi ${studentName},`,
     "",
+    ...(examName ? [`Exam: ${examName}`, ""] : []),
     accessLine,
     "",
     `Open ${productName}:`,
@@ -100672,7 +100678,7 @@ async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", a
   try {
     const provider = await sendEmailMessage({
       to: user.email,
-      subject: `Your ${productName} access is ready`,
+      subject: examName ? `Your AylaMed ${examName} access is ready` : `Your ${productName} access is ready`,
       ...(primarySite ? { from: ngAylaExamEmailFrom(primarySite.siteId) } : {}),
       text: lines.join("\n"),
       transport: "aylamed",
@@ -101190,6 +101196,7 @@ async function ngAdminMobileInviteAyla(body = {}) {
       temporaryPassword,
       accessReport,
       examTrackId: preservedEnrollment.exam_track_id || preservedEnrollment.examTrackId || preservedEnrollment.exam_track || preservedEnrollment.exam,
+      examVariant: preservedEnrollment.exam_variant || preservedEnrollment.examVariant || "",
       sendEmail: body.send_email !== false,
     });
     ngAdminMobileCredentialState(preservedEnrollment, delivery);
@@ -101260,6 +101267,7 @@ async function ngAdminMobileInviteAyla(body = {}) {
     existingAccount: passwordKept,
     accessReport: accessWindow,
     examTrackId: enrollment.exam_track_id || enrollment.examTrackId || enrollment.exam_track || enrollment.exam,
+    examVariant: enrollment.exam_variant || enrollment.examVariant || "",
     sendEmail: body.send_email !== false,
   });
   ngAdminMobileCredentialState(enrollment, delivery);
