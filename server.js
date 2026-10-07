@@ -70901,7 +70901,13 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       return ["completed", "ended", "past", "live", "in_progress", "in-progress"].includes(status) ||
         Boolean(session.recording_url || session.recording_id || session.transcript_url);
     });
+    const ngRecordingHasMedia = (recording = {}) => Boolean(
+      recording.recording_url || recording.share_url || recording.download_url || recording.play_url ||
+      recording.vimeo_link || recording.vimeo_player_url || recording.vimeo_id || recording.uuid ||
+      recording.start_time || Number(recording.duration || 0) > 0
+    );
     const lockedRecording = Object.values(db.recordings || {}).find((recording) => {
+      if (!ngRecordingHasMedia(recording)) return false;
       return laterDayIds.has(String(recording?.roadmap_day_id || "")) || laterSessionIds.has(String(recording?.session_id || ""));
     });
     const ngStaffRoles = new Set(["admin", "super_admin", "instructor", "tutor"]);
