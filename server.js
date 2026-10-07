@@ -18079,6 +18079,44 @@ app.post("/live/attendance/mark", async (req, res) => {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
 });
+// Removes one attendance record that does not belong to its session (e.g. a
+// student opened a class that was then made a holiday, and the session moved
+// to a later date with the record). Saves a backup first and recalculates the
+// student's leaderboard row.
+app.post("/admin/attendance/clear", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const sessionId = String(req.body.session_id || "").trim();
+    const userId = String(req.body.user_id || "").trim();
+    if (!sessionId || !userId) return res.status(400).json({ success: false, error: "session_id and user_id are required" });
+    const key = `${userId}:${sessionId}`;
+    const record = db.attendance?.[key] || null;
+    if (!record) return res.status(404).json({ success: false, error: "Attendance record not found" });
+    const preview = { key, user_id: record.user_id, session_id: record.session_id, course_id: record.course_id, date: record.date || null, source: record.source || null, marked_at: record.marked_at || null };
+    if (String(req.body.confirm || "") !== "CLEAR_ATTENDANCE") return res.json({ success: true, dry_run: true, record: preview });
+
+    await ensureDataDir();
+    const backupDir = path.join(DATA_DIR, "backups");
+    await fs.mkdir(backupDir, { recursive: true });
+    const backupName = `live-session-db-before-attendance-clear-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    await fs.writeFile(path.join(backupDir, backupName), JSON.stringify(db), "utf8");
+
+    delete db.attendance[key];
+    const student = db.users?.[String(record.user_id || "")] || {};
+    const leaderboard = record.course_id
+      ? updateLeaderboard(db, { courseId: record.course_id, userId: record.user_id, userName: student.name || record.user_name || "Student" })
+      : null;
+    db.attendanceClearLog = Array.isArray(db.attendanceClearLog) ? db.attendanceClearLog : [];
+    db.attendanceClearLog.push({ ...preview, cleared_at: new Date().toISOString(), cleared_by: user.id, reason: String(req.body.reason || "").slice(0, 300) });
+    await writeLiveDb(db);
+    res.json({ success: true, dry_run: false, cleared: preview, backup: backupName, leaderboard });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to clear attendance" });
+  }
+});
+
+
 app.get("/live/leaderboard", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
