@@ -6547,6 +6547,67 @@ function ngResolveExactSessionForZoomRecording(db, object = {}, previous = {}) {
   };
 }
 
+// Fallback for a class held in another Zoom meeting (the Personal Meeting Room,
+// or another day's meeting), so the meeting ID matches no session. A recording
+// of 20+ minutes that starts from 30 minutes before to 3 hours after exactly one
+// scheduled class belongs to that class, unless the class already has a real
+// recording. Matches made this way are reported to the admins on WhatsApp.
+const NG_CLASS_WINDOW_MIN_RECORDING_MINUTES = 20;
+const NG_CLASS_WINDOW_BEFORE_MS = 30 * 60 * 1000;
+const NG_CLASS_WINDOW_AFTER_MS = 3 * 60 * 60 * 1000;
+
+function ngResolveClassWindowSessionForZoomRecording(db, object = {}, { recordingKey = "" } = {}) {
+  const recordingStartMs = new Date(object.start_time || "").getTime();
+  if (!Number.isFinite(recordingStartMs)) return { session: null, exact: false, reason: "class_window_missing_start" };
+  if (Number(object.duration || 0) < NG_CLASS_WINDOW_MIN_RECORDING_MINUTES) {
+    return { session: null, exact: false, reason: "class_window_recording_too_short" };
+  }
+  const candidates = [];
+  for (const session of Object.values(db.liveSessions || {})) {
+    if (!ngZoomRecordingSessionEligible(db, session)) continue;
+    const startMs = getSessionStartUtc(session.scheduled_date, session.scheduled_time, session.scheduled_timezone || DEFAULT_TIMEZONE)?.getTime?.();
+    if (!Number.isFinite(startMs)) continue;
+    if (recordingStartMs < startMs - NG_CLASS_WINDOW_BEFORE_MS || recordingStartMs > startMs + NG_CLASS_WINDOW_AFTER_MS) continue;
+    candidates.push({ session, startMs });
+  }
+  if (candidates.length !== 1) {
+    return { session: null, exact: false, reason: candidates.length ? "class_window_ambiguous" : "class_window_no_class", candidate_count: candidates.length };
+  }
+  const { session, startMs } = candidates[0];
+  const objectUuid = String(object.uuid || "");
+  const alreadyRecorded = Object.entries(db.recordings || {}).some(([key, recording]) => (
+    key !== recordingKey &&
+    String(recording?.session_id || "") === String(session.id) &&
+    !(objectUuid && String(recording?.uuid || "") === objectUuid) &&
+    Boolean(recording?.uuid || recording?.recording_url || recording?.share_url || recording?.vimeo_link || Number(recording?.duration || 0) > 0)
+  ));
+  if (alreadyRecorded) return { session: null, exact: false, reason: "class_window_session_already_recorded", candidate_count: 1 };
+  return {
+    session,
+    exact: true,
+    reason: "class_time_window",
+    candidate_count: 1,
+    time_difference_minutes: Math.round((recordingStartMs - startMs) / 60000),
+  };
+}
+
+async function ngAlertClassWindowRecordingMatch({ session = {}, object = {}, minutes = 0 } = {}) {
+  const when = minutes >= 0 ? `${minutes} min after` : `${-minutes} min before`;
+  const text = [
+    `Class recording linked by class time: "${session.title || session.topic || "Live class"}" (${session.scheduled_date || ""}).`,
+    `It was recorded in a different Zoom meeting (${object.id || ""}${object.topic ? `, "${object.topic}"` : ""}), started ${when} class time and is ${object.duration || 0} min long.`,
+    "Please check it is the right lecture in Admin > Recordings.",
+  ].join("\n");
+  const crmDb = await readCrmDb();
+  const alert = await ngSendAdminWhatsAppAlert(crmDb, {
+    type: "lms_recording_class_window_match",
+    text,
+    meta: { session_id: session.id || null, meeting_id: String(object.id || ""), start_time: object.start_time || null },
+  });
+  await writeCrmDb(crmDb);
+  return alert;
+}
+
 async function fetchZoomRecordingByMeetingId(meetingId) {
   const accessToken = await getZoomAccessToken();
   const encodedMeetingId = encodeURIComponent(String(meetingId || ""));
@@ -6601,7 +6662,9 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
   // the Zoom occurrence has its own UUID/start time. Recurring meetings share
   // one meeting ID, which is what previously caused one day's state to leak.
   const previous = storedOccurrence.recording || {};
-  const exactMatch = ngResolveExactSessionForZoomRecording(db, object, previous);
+  const meetingIdMatch = ngResolveExactSessionForZoomRecording(db, object, previous);
+  const classWindowMatch = meetingIdMatch.exact ? null : ngResolveClassWindowSessionForZoomRecording(db, object, { recordingKey });
+  const exactMatch = classWindowMatch?.exact ? classWindowMatch : meetingIdMatch;
   const hasAdminAssignment = Boolean(
     previous.assignment_locked === true ||
     previous.assignment_source === "admin_explicit_session"
@@ -6697,7 +6760,7 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     auto_published_at: previous.auto_published_at || (becamePublished ? receivedAt : null),
     assignment_source: hasAdminAssignment
       ? "admin_explicit_session"
-      : previous.assignment_source || (matchedSession ? "zoom_exact_match" : null),
+      : previous.assignment_source || (matchedSession ? (effectiveMatch.reason === "class_time_window" ? "zoom_class_time_window" : "zoom_exact_match") : null),
     assignment_locked: hasAdminAssignment,
     exact_session_match: effectiveMatch.exact === true,
     exact_session_match_reason: effectiveMatch.reason || null,
@@ -6827,6 +6890,11 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
   });
   if (sessionId && notesPublicationResult.session_ids.includes(sessionId)) {
     ngSyncSessionNoteStatusToRoadmap(db, sessionId, db.notes?.[sessionId]);
+  }
+
+  if (effectiveMatch.reason === "class_time_window" && sessionId && String(previous.session_id || "") !== String(sessionId)) {
+    ngAlertClassWindowRecordingMatch({ session: matchedSession, object, minutes: effectiveMatch.time_difference_minutes })
+      .catch((error) => console.warn("Class-time recording alert failed:", error.message));
   }
 
   return {
@@ -99529,7 +99597,7 @@ async function ngRunZoomRecordingRecoveryTick(reason = "interval") {
       timeout: 20000,
     });
     const meetings = (response.data?.meetings || [])
-      .filter((meeting) => knownMeetingIds.has(String(meeting.id || "")))
+      .filter((meeting) => knownMeetingIds.has(String(meeting.id || "")) || ngResolveClassWindowSessionForZoomRecording(db, meeting).exact)
       .slice(0, 12);
     let imported = 0;
     let autoPublished = 0;
