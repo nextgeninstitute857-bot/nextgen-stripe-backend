@@ -89659,7 +89659,19 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   if (balancePolicy.enabled) scheduleExternalQuestions();
 
   const relatedReadingFallback = (progressRows) => {
-    const words = new Set(`${focusSystem} ${focusSubsystem} ${focusTopic}`.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 3));
+    // Disciplines (Step 2/3, PLAB, AMC, MCCQE) map onto the organ-system chapters books use.
+    const disciplineSystems = {
+      "internal medicine": "cardiovascular respiratory gastrointestinal renal endocrine hematology infectious rheumatology",
+      medicine: "cardiovascular respiratory gastrointestinal renal endocrine hematology infectious",
+      surgery: "gastrointestinal trauma vascular breast",
+      pediatrics: "pediatric neonatal",
+      "obstetrics and gynecology": "reproductive obstetrics gynecology pregnancy",
+      "family medicine": "cardiovascular endocrine preventive respiratory",
+      "emergency medicine": "cardiovascular respiratory trauma toxicology",
+      psychiatry: "psychiatry psychiatric behavioral",
+    };
+    const extraWords = disciplineSystems[String(focusSystem || "").trim().toLowerCase()] || "";
+    const words = new Set(`${focusSystem} ${focusSubsystem} ${focusTopic} ${extraWords}`.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 3));
     const frontMatter = /^(contents|table of contents|acknowledg|about |preface|foreword|index|copyright|dedication|section \d|how to use)/i;
     const ranked = allRelevant
       .filter((row) => ["book", "reading", "revision_sheet"].includes(aylaV189ResourceType(row.type)))
@@ -89669,6 +89681,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
         score: String(`${row.topic || ""} ${row.title || ""} ${row.subsystem || ""} ${row.system || ""}`)
           .toLowerCase().split(/[^a-z0-9]+/).filter((word) => words.has(word)).length,
       }))
+      // Only pages that share a word with today's subject; never a random page.
+      .filter((entry) => entry.score > 0)
       .sort((left, right) => right.score - left.score)
       .slice(0, 80)
       .map((entry) => entry.row);
