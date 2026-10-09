@@ -88925,7 +88925,7 @@ async function aylaV189TutorProposal(db, student, date, focusCandidates = [], ca
       model,
     };
   } catch (error) {
-    return { ...fallback, mode: "deterministic_ai_error_fallback", rationale: `${fallback.rationale} AI proposal was unavailable, so verified deterministic planning was used.` };
+    return { ...fallback, mode: "deterministic_ai_error_fallback", rationale: fallback.rationale };
   }
 }
 
