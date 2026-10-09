@@ -89043,10 +89043,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   }
   // Work scheduled before the student finished setup was built from a placeholder
   // profile; it must not come back as "Catch-up" on their first real day.
-  const setupDate = String(student.startingChoiceSelectedAt || student.starting_choice_selected_at || "").slice(0, 10);
+  const setupAt = String(student.startingChoiceSelectedAt || student.starting_choice_selected_at || "");
+  const setupDate = setupAt.slice(0, 10);
   const overdue = studentAssignments
     .filter((row) => String(row.scheduledDate || "") < String(date || ""))
     .filter((row) => !setupDate || String(row.scheduledDate || "") >= setupDate)
+    // Same-day work created before setup finished also came from the placeholder profile.
+    .filter((row) => !setupAt || !row.createdAt || String(row.createdAt) >= setupAt)
     .filter((row) => !["completed", "skipped", "cancelled", "superseded", "moved"].includes(String(row.status || "pending").toLowerCase()))
     .sort((a, b) => String(a.scheduledDate || "").localeCompare(String(b.scheduledDate || "")))
     .filter((row) => aylaOriginalOverdueAssignment(row))
