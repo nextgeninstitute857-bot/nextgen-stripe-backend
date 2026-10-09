@@ -83731,6 +83731,13 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
       weakAreaLogs,
       examDefinition,
     });
+    // Today's plan may already exist from the placeholder profile (built before
+    // setup). Rebuild it so it uses the hours, date and weak areas just chosen.
+    try {
+      await aylaV189BuildDailyPlan(db, student, aylaV247StudyDate(student), { force: true, includeAssessment: false, reason: "onboarding_completed" });
+    } catch (planError) {
+      console.warn("AylaMed post-setup daily plan rebuild skipped:", planError.message);
+    }
     await aylaLog(db, "diagnostic", "AylaMed personalized diagnostic and 7-day roadmap generated", { submissionId: submission.id, studentId: student.id, examTrackId, enrollmentId: setupAccess?.enrollment_id || null, riskLevel: recommendation.riskLevel, phase: recommendation.phase, targetDate: recommendation.targetDate });
     await writeAylaDb(db);
 
@@ -89034,8 +89041,12 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       aylaSetItem(db, "aylaResourceAssignments", row);
     }
   }
+  // Work scheduled before the student finished setup was built from a placeholder
+  // profile; it must not come back as "Catch-up" on their first real day.
+  const setupDate = String(student.startingChoiceSelectedAt || student.starting_choice_selected_at || "").slice(0, 10);
   const overdue = studentAssignments
     .filter((row) => String(row.scheduledDate || "") < String(date || ""))
+    .filter((row) => !setupDate || String(row.scheduledDate || "") >= setupDate)
     .filter((row) => !["completed", "skipped", "cancelled", "superseded", "moved"].includes(String(row.status || "pending").toLowerCase()))
     .sort((a, b) => String(a.scheduledDate || "").localeCompare(String(b.scheduledDate || "")))
     .filter((row) => aylaOriginalOverdueAssignment(row))
@@ -89496,7 +89507,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   };
   plan.tutorBrain.authoritativeRoadmapPlanId = plan.id;
   plan.assessmentTutor = assessmentDecision;
-  plan.finalReviewMode = assessmentDecision.daysToTarget >= 0
+  // No exam date means "no target yet", not "0 days left".
+  plan.finalReviewMode = Boolean(aylaTargetDateInfo(student).targetDate)
+    && assessmentDecision.daysToTarget >= 0
     && assessmentDecision.daysToTarget <= aylaNumber(settings.assessment_policy?.final_readiness_days, 7);
 
   // Protected rest days contain only due revision and critical backlog. No normal new content.
