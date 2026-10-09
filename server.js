@@ -89546,9 +89546,22 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index);
   const storedCards = allRelevant.filter((row) => aylaV189ResourceType(row.type) === "flashcard");
   const focusedCards = focused(storedCards);
+  // When nothing matches today's focus, review the student's own cards made from
+  // questions they got wrong (any subject), so flashcards still appear on every exam.
+  const ownMistakeCards = () => {
+    const seen = new Set();
+    return aylaValues(db, "aylaResources")
+      .filter((row) => aylaV189ResourceType(row.type) === "flashcard")
+      .filter((row) => String(row.ownerStudentId || row.owner_student_id || "") === String(student.id))
+      .filter((row) => !["disabled", "deleted", "rejected", "archived", "quarantined"].includes(String(row.status || "").toLowerCase()))
+      .filter((row) => (seen.has(String(row.id)) ? false : seen.add(String(row.id))));
+  };
+  const registryCards = prioritize(storedCards.filter((row) => row.sourceType === "content_registry_flashcard"));
   const cards = focusedCards.length
     ? focusedCards
-    : prioritize(storedCards.filter((row) => row.sourceType === "content_registry_flashcard"));
+    : registryCards.length
+      ? registryCards
+      : prioritize(ownMistakeCards());
   const assessments = focused(allRelevant.filter((row) => ["assessment", "assessment_blueprint"].includes(aylaV189ResourceType(row.type))));
   const unused = (rows) => rows.filter((row) => !reservedIds.has(String(row.id)));
   const select = (rows, limit) => aylaV189SelectUnused(unused(rows), reservedIds, limit);
@@ -89645,9 +89658,36 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   // Other exam tracks keep their existing ordering below.
   if (balancePolicy.enabled) scheduleExternalQuestions();
 
+  const relatedReadingFallback = (progressRows) => {
+    const words = new Set(`${focusSystem} ${focusSubsystem} ${focusTopic}`.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 3));
+    const frontMatter = /^(contents|table of contents|acknowledg|about |preface|foreword|index|copyright|dedication|section \d|how to use)/i;
+    const ranked = allRelevant
+      .filter((row) => ["book", "reading", "revision_sheet"].includes(aylaV189ResourceType(row.type)))
+      .filter((row) => !frontMatter.test(String(row.topic || row.title || "").trim()))
+      .map((row) => ({
+        row,
+        score: String(`${row.topic || ""} ${row.title || ""} ${row.subsystem || ""} ${row.system || ""}`)
+          .toLowerCase().split(/[^a-z0-9]+/).filter((word) => words.has(word)).length,
+      }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 80)
+      .map((entry) => entry.row);
+    if (!ranked.length) return null;
+    const fallback = selectAylaRoadmapReading({
+      resources: ranked,
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+      focusSystem: "",
+      focusTopic: "",
+      progressRows,
+      reservedResourceIds: [...reservedIds],
+      preferredResourceIds: ranked.map((row) => row.id),
+    });
+    return fallback.resource ? { ...fallback, match_level: "related" } : null;
+  };
+
   const scheduleReading = () => {
     if (mix.reading === false) return;
-    const selection = selectAylaRoadmapReading({
+    let selection = selectAylaRoadmapReading({
       resources: reading,
       examTrack: student.examTrackId || student.exam_track_id || student.exam,
       focusSystem,
@@ -89656,6 +89696,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       reservedResourceIds: [...reservedIds],
       preferredResourceIds: aylaCleanArray(tutorProposal.preferredResourceIds),
     });
+    if (!selection.resource && !plan.finalReviewMode) {
+      selection = relatedReadingFallback(aylaValues(db, "aylaReadingProgress").filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))) || selection;
+    }
     const pick = selection.resource ? [selection.resource] : [];
     const finalReviewReadingAllowed = !plan.finalReviewMode
       || selection.resumed
