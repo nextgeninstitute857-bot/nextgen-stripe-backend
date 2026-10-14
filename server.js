@@ -55,6 +55,7 @@ import {
   selectBrandIntegration,
 } from "./lib/crm-brand-routing.js";
 import { buildMetaConversionOutcomes } from "./lib/crm-meta-conversion-outcomes.js";
+import { buildWebsitePurchaseEvent, buildWhatsAppAdEvent, markWhatsAppAdReported, pendingWhatsAppAdReports } from "./lib/meta-capi-events.js";
 import { experienceQueueRows, experienceTemplateProposal } from "./lib/crm-experience-reporting.js";
 import { applyLeadInboxRouting, inferLeadExamTrack } from "./lib/crm-lead-routing.js";
 import {
@@ -1228,7 +1229,7 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true, limit: NEXTGEN_JSON_BODY_LIMIT }));
 
-const META_CAPI_ALLOWED_EVENTS = new Set(["Lead"]);
+const META_CAPI_ALLOWED_EVENTS = new Set(["Lead", "Schedule"]);
 const metaCapiRateBuckets = new Map();
 const metaCapiAcceptedEventIds = new Map();
 
@@ -1322,6 +1323,60 @@ function ngMetaCapiEventWasAccepted(eventId, nowMs = Date.now()) {
     }
   }
   return false;
+}
+
+// Server-side Conversions API events (Stripe purchases, WhatsApp-ad outcomes). Never throws:
+// tracking must not break payments or the CRM heartbeat.
+async function ngMetaCapiSendServerEvents(events = [], { datasetId = "" } = {}) {
+  const config = ngMetaCapiConfig();
+  const target = String(datasetId || config.pixelId || "").trim();
+  const data = (Array.isArray(events) ? events : []).filter(Boolean);
+  if (!config.token || !target || !data.length) return { sent: false, reason: !data.length ? "no_events" : "not_configured" };
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/${encodeURIComponent(config.graphVersion)}/${encodeURIComponent(target)}/events`,
+      { data, ...(config.testEventCode ? { test_event_code: config.testEventCode } : {}) },
+      { params: { access_token: config.token }, headers: { "Content-Type": "application/json" }, timeout: 12000 }
+    );
+    return { sent: true, events_received: Number(response.data?.events_received || 0) };
+  } catch (error) {
+    const message = error.response?.data?.error?.message || error.message;
+    console.error("Meta CAPI server event failed:", { status: error.response?.status || null, message });
+    return { sent: false, reason: "meta_error", error: String(message || "").slice(0, 300) };
+  }
+}
+
+async function ngMetaReportStripePurchase(session = {}) {
+  const event = buildWebsitePurchaseEvent(session, { sourceUrl: `${String(process.env.FRONTEND_URL || "https://nextgenusmle.live").replace(/\/$/, "")}/plans` });
+  if (!event || ngMetaCapiEventWasAccepted(event.event_id)) return { sent: false, reason: event ? "duplicate" : "not_a_paid_sale" };
+  const result = await ngMetaCapiSendServerEvents([event]);
+  if (result.sent) metaCapiAcceptedEventIds.set(event.event_id, Date.now());
+  return result;
+}
+
+// WhatsApp-ad leads: tell Meta when a lead from a click-to-WhatsApp ad becomes qualified or pays,
+// so the ads learn which clicks turn into students. Off until META_CTWA_CAPI_ENABLED=true
+// (the dataset must first be linked to the WhatsApp Business Account in Events Manager).
+async function ngReportWhatsAppAdConversions(db = {}, { limit = 20 } = {}) {
+  if (String(process.env.META_CTWA_CAPI_ENABLED || "").toLowerCase() !== "true") return { skipped: true, reason: "disabled", reported: 0 };
+  const wabaId = String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || process.env.WHATSAPP_WABA_ID || NEXTGEN_WHATSAPP_BUSINESS_ACCOUNT_ID || "").trim();
+  const leads = ensureCrmArray(db, "leads").filter((lead) => String(lead.brand_id || "brand_nextgen_usmle") === "brand_nextgen_usmle");
+  let reported = 0;
+  const errors = [];
+  for (const { lead, eventName } of pendingWhatsAppAdReports(leads, { limit })) {
+    const value = Number(lead.amount_paid || lead.paid_amount || lead.deal_value || lead.revenue || 0) || 0;
+    const event = buildWhatsAppAdEvent({ lead, eventName, wabaId, value });
+    if (!event) continue;
+    const result = await ngMetaCapiSendServerEvents([event], { datasetId: process.env.META_CTWA_DATASET_ID || "" });
+    if (result.sent) {
+      markWhatsAppAdReported(lead, eventName);
+      reported += 1;
+    } else {
+      errors.push(result.error || result.reason);
+      if (result.reason === "not_configured") break;
+    }
+  }
+  return { reported, errors: errors.slice(0, 5) };
 }
 
 app.get("/api/capi-event/health", (_req, res) => {
@@ -5675,7 +5730,12 @@ async function ngHandleStripeWebhookEvent(event = {}, req = null) {
     return aylaHandleStripeWebhookEvent(event, req);
   }
 
-  if (event.type === "checkout.session.completed") return ngHandleStripeCheckoutCompleted(event, req);
+  if (event.type === "checkout.session.completed") {
+    const completed = await ngHandleStripeCheckoutCompleted(event, req);
+    // Teach the Meta pixel who pays. Runs after access is granted and never blocks the webhook.
+    ngMetaReportStripePurchase(event.data?.object || {}).catch(() => {});
+    return completed;
+  }
   if (event.type === "checkout.session.expired") return ngHandleStripeCheckoutExpired(event);
   if (event.type === "payment_intent.payment_failed") return ngHandleStripePaymentFailed(event);
 
@@ -76906,6 +76966,7 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
     let firstMessageResults = [];
     let noReplyResults = [];
     let googleMeetResult = null;
+    let whatsAppAdResult = null;
     let runExperienceChecks = false;
     if (now - ngV116LastFirstMessageRunAt >= Math.max(5000, Number(process.env.NEXTGEN_HEARTBEAT_FIRST_MESSAGE_MS || 15000))) {
       ngV116LastFirstMessageRunAt = now;
@@ -76922,6 +76983,7 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
       runExperienceChecks = true;
       noReplyResults = await ngV116RunNoReplyLmsNurture({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_NO_REPLY_LIMIT || 20))), source: `${source}_no_reply_nurture` });
       googleMeetResult = await ngRunGoogleMeetAppointmentScheduler({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_GOOGLE_MEET_LIMIT || 25))), dryRun: false, source: `${source}_google_meet` });
+      whatsAppAdResult = await ngReportWhatsAppAdConversions(db);
     }
     // AI results that only skipped (or failed before sending) change nothing that
     // must be saved right away; saving the whole CRM database for them every tick
@@ -76934,7 +76996,7 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
       return Boolean(inbound && ngHasOutboundAfterInbound(messages, inbound));
     });
     const aiBookkeepingDue = aiResults.length > 0 && now - ngV116LastAiBookkeepingWriteAt >= NG_V116_AI_BOOKKEEPING_WRITE_MS;
-    const changed = clearResults.length || aiDelivered || aiBookkeepingDue || firstMessageResults.length || noReplyResults.length || dailySessionResult?.changed || Number(googleMeetResult?.processed || 0);
+    const changed = clearResults.length || aiDelivered || aiBookkeepingDue || firstMessageResults.length || noReplyResults.length || dailySessionResult?.changed || Number(googleMeetResult?.processed || 0) || Number(whatsAppAdResult?.reported || 0);
     if (changed && aiResults.length) ngV116LastAiBookkeepingWriteAt = now;
     if (changed) await writeCrmDb(db);
     // Run after the older heartbeat snapshot is saved. This worker uses fresh,
