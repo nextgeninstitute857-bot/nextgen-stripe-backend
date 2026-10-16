@@ -36344,9 +36344,10 @@ async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit 
     return { action, processed: 0, sent: 0, skipped: 0, reason: "labelled_recording_not_available", results: [], override };
   }
   const templateIdDefault = settings.no_session_recording_template_key || settings.no_session_today_template_key || "no_session_recording_fallback";
+  const lmsStudents = await ngLoadLmsActiveStudentKeys();
   const leads = ensureCrmArray(db, "leads")
     .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
-    .filter((lead) => ngDailyLiveSessionEligibleLead(db, lead, settings))
+    .filter((lead) => ngDailyLiveSessionEligibleLead(db, lead, settings, { action: "daily_session_invite", lmsStudents, now: new Date() }))
     .slice(0, Math.max(1, Math.min(300, Number(limit || 50))));
 
   const results = [];
@@ -36543,8 +36544,71 @@ function ngLeadIsPaidOrGroupAddedForLiveSession(lead = {}) {
   return /(paid_enrolled|paid|enrolled|converted|closed_won|student_active|active_student|group_added|added_to_paid_group|paid_group_added|manual_paid)/i.test(blob);
 }
 
-function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}) {
+// Fix 3: a lead whose email or phone belongs to an LMS user with active paid
+// access is a student, never a sales lead. Built once per scheduler run.
+function ngLmsActiveStudentKeys(liveDb = {}) {
+  const emails = new Set();
+  const phones = new Set();
+  const users = liveDb.users || {};
+  for (const enrollment of Object.values(liveDb.enrollments || {})) {
+    if (!enrollment || enrollment.is_demo === true) continue;
+    const plan = enrollment.plan_id ? liveDb.plans?.[String(enrollment.plan_id)] || null : null;
+    let active = false;
+    try { active = isPaidEnrollmentActive(enrollment, plan, liveDb); } catch { active = false; }
+    if (!active) continue;
+    const user = users[String(enrollment.user_id)] || Object.values(users).find((u) => String(u?.id) === String(enrollment.user_id)) || {};
+    const email = String(user.email || enrollment.email || enrollment.student_email || "").trim().toLowerCase();
+    if (email) emails.add(email);
+    const digits = String(user.whatsapp || user.phone || enrollment.phone || "").replace(/\D/g, "");
+    if (digits.length >= 8) phones.add(digits.slice(-10));
+  }
+  return { emails, phones };
+}
+
+function ngLeadIsLmsStudent(lead = {}, keys = null) {
+  if (!keys) return false;
+  const email = String(lead.email || lead.student_email || lead.customer_email || "").trim().toLowerCase();
+  if (email && keys.emails.has(email)) return true;
+  const digits = String(ng41LeadPhone(lead) || "").replace(/\D/g, "");
+  return digits.length >= 8 && keys.phones.has(digits.slice(-10));
+}
+
+// Fixes 1 and 2: unpaid leads get the class sequence only for their first week
+// (counted from when they joined or last wrote to us), then one invite on
+// Mondays for three more weeks, then nothing. By default only the morning
+// invite goes out; the 5-minute reminder, join link and recording messages are
+// for leads who asked for reminders (or when the full sequence is switched on).
+const NG_DAILY_SESSION_REMINDER_ACTIONS = new Set(["five_minute_reminder", "session_link", "post_session_recording"]);
+
+function ngDailyLiveSessionLeadAnchorMs(db = {}, lead = {}) {
+  const stamps = [lead.created_at, lead.first_seen_at, lead.last_inbound_at, lead.last_reply_at, lead.last_message_from_lead_at];
+  try {
+    const inbound = ngLatestInbound(ngLeadConversationMessages(db, lead.id));
+    stamps.push(inbound?.created_at, inbound?.received_at, inbound?.timestamp);
+  } catch {
+    // Conversation history is optional for this check.
+  }
+  return Math.max(0, ...stamps.map((value) => Date.parse(value || "") || 0));
+}
+
+function ngDailyLiveSessionCadenceAllows(db = {}, lead = {}, settings = {}, action = "", now = new Date()) {
+  if (!action) return true;
+  const fullSequence = settings.daily_session_full_sequence === true || lead.live_session_reminders_opt_in === true;
+  if (NG_DAILY_SESSION_REMINDER_ACTIONS.has(action) && !fullSequence) return false;
+  const anchor = ngDailyLiveSessionLeadAnchorMs(db, lead);
+  if (!anchor) return true; // no dates at all: treat as new
+  const days = (now.getTime() - anchor) / 86400000;
+  const activeDays = Number(settings.daily_session_active_days || 7);
+  const weeklyUntilDays = Number(settings.daily_session_weekly_until_days || 28);
+  if (days <= activeDays) return true;
+  if (days > weeklyUntilDays) return false;
+  const weekday = ngDailySessionTimeParts(now, "America/New_York").weekday;
+  return weekday === "Mon" && !NG_DAILY_SESSION_REMINDER_ACTIONS.has(action);
+}
+
+function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}, context = {}) {
   if (!lead?.id) return false;
+  if (ngLeadIsLmsStudent(lead, context.lmsStudents)) return false;
   const stage = normalizeCrmLeadStageValue(lead.stage || lead.lead_stage || lead.status || "new_lead", "new_lead");
   // These are hard stop conditions. A saved setting must never resume sales
   // messages after enrollment, payment, opt-out, or a clear lack of interest.
@@ -36556,11 +36620,14 @@ function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}) {
   if (lead.suppressed || lead.ai_suppressed || ng41IsSuppressed(db, lead)) return false;
   // Every future consenting lead should receive the scheduled live-session
   // sequence. Do not require an earlier programme-tour message first.
-  if (!ng41LeadPhone(lead) && !lead.email) return false;
+  if (!ng41LeadPhone(lead)) {
+    const channel = String(lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp").toLowerCase();
+    if (!channel || channel.includes("whatsapp") || channel.includes("email")) return false;
+  }
   if (["new_lead", "first_message_sent"].includes(stage) && settings.daily_session_send_to_new_leads === false) return false;
   if (["interested", "session_today", "hot_lead", "google_meet_requested"].includes(stage) && settings.daily_session_send_to_interested === false) return false;
   if (["no_reply", "warm", "follow_up"].includes(stage) && settings.daily_session_send_to_no_reply === false) return false;
-  return true;
+  return ngDailyLiveSessionCadenceAllows(db, lead, settings, context.action || "", context.now || new Date());
 }
 
 function ngDailyLiveSessionAttemptMatches(row = {}, lead = {}, action = "", dateKey = "") {
@@ -36600,18 +36667,27 @@ function ngDailyLiveSessionAttemptBlocksRetry(db = {}, row = {}) {
 }
 
 function ngDailyLiveSessionAlreadyAttempted(db = {}, lead = {}, action = "", dateKey = "") {
-  return ["message_logs", "message_delivery_locks"].some((collection) =>
+  const blocked = ["message_logs", "message_delivery_locks"].some((collection) =>
     ensureCrmArray(db, collection).some((row) =>
       ngDailyLiveSessionAttemptMatches(row, lead, action, dateKey) && ngDailyLiveSessionAttemptBlocksRetry(db, row)
     )
   );
+  if (blocked) return true;
+  // One failure may be a passing outage, so one same-day retry is allowed.
+  // After two failures the problem is the recipient: stop until tomorrow.
+  const failed = new Set(["failed", "error", "provider_blocked", "undelivered", "rejected"]);
+  const failures = ensureCrmArray(db, "message_logs").filter((row) =>
+    ngDailyLiveSessionAttemptMatches(row, lead, action, dateKey)
+    && failed.has(String(row.status || row.provider_status || "").trim().toLowerCase())
+  ).length;
+  return failures >= 2;
 }
 
-function ngDailyLiveSessionPendingLeadBatch(db = {}, settings = {}, { brandId = null, action = "", dateKey = "", limit = 50 } = {}) {
+function ngDailyLiveSessionPendingLeadBatch(db = {}, settings = {}, { brandId = null, action = "", dateKey = "", limit = 50, lmsStudents = null, now = new Date() } = {}) {
   const batchLimit = Math.max(1, Math.min(200, Number(limit || 50)));
   return ensureCrmArray(db, "leads")
     .filter((lead) => String(lead.brand_id || NEXTGEN_BRAND_ID) === String(brandId || NEXTGEN_BRAND_ID))
-    .filter((lead) => ngDailyLiveSessionEligibleLead(db, lead, settings))
+    .filter((lead) => ngDailyLiveSessionEligibleLead(db, lead, settings, { action, lmsStudents, now }))
     // Remove completed claims before applying the batch limit. Otherwise every
     // heartbeat rechecks the same first page and later eligible leads never run.
     .filter((lead) => !ngDailyLiveSessionAlreadyAttempted(db, lead, action, dateKey))
@@ -36732,7 +36808,7 @@ function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
   const rec = assets.recordingLink && recordingTitle
     ? `\n\n${recordingTitle}\nRecording:\n${assets.recordingLink}`
     : "";
-  return `Doctor, in case you missed today’s live session, you can catch up here.${rec}\n\nLet us know how you liked the teaching style. Would you like to join the program, or should I book a mentor call for you?`;
+  return `Doctor, in case you missed today’s live session, you can catch up here.${rec}`;
 }
 
 function ngRecordDailyLiveSessionPhaseState(db = {}, {
@@ -36814,6 +36890,15 @@ function ngRecordDailyLiveSessionPhaseState(db = {}, {
   return true;
 }
 
+async function ngLoadLmsActiveStudentKeys() {
+  try {
+    return ngLmsActiveStudentKeys(await readLiveDb());
+  } catch (error) {
+    console.warn("Daily live session: could not read LMS enrollments:", error.message);
+    return null;
+  }
+}
+
 async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
   if (brandId && String(brandId) !== NEXTGEN_BRAND_ID) {
     return { action: null, processed: 0, sent: 0, skipped: 0, results: [], reason: "brand_assets_not_configured", brand_id: brandId };
@@ -36861,7 +36946,8 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       ? settings.post_session_recording_template_key
       : "nextgen_class_recording_link",
   };
-  const leads = ngDailyLiveSessionPendingLeadBatch(db, settings, { brandId, action, dateKey, limit });
+  const lmsStudents = await ngLoadLmsActiveStudentKeys();
+  const leads = ngDailyLiveSessionPendingLeadBatch(db, settings, { brandId, action, dateKey, limit, lmsStudents, now: nowDate });
   const preferredScheduledTemplateKey = templateMap[action] || null;
   const approvedFallbackTemplates = {
     // The approved five-minute reminder has a stable Open Live Sessions button.
