@@ -30714,6 +30714,26 @@ function upsertSocialLead(db, platform, payload = {}) {
   return { lead, created: true };
 }
 
+// A lead who asks for class reminders ("remind me", "send me the link before
+// class") gets the full live-class sequence: 5-minute reminder, join link and
+// recording. "Stop the reminders" turns it off again. Anything else: no change.
+function ngLiveSessionReminderPreference(text = "") {
+  const t = String(text || "").toLowerCase();
+  if (!t) return null;
+  if (/\b(stop( sending)?( me)?( the)?|no more|(don'?t|do not|dont) send( me)?( the| any)?)\s+(class\s+)?(reminders?|notifications?|links?|messages?)\b/.test(t)) return false;
+  if (/\b(remind me|please remind|send (me )?(a |the )?reminders?|reminders? please|notify me|let me know before|send (me )?the (class |zoom |join |meeting )?link|link before (the )?class)\b/.test(t)) return true;
+  return null;
+}
+
+function ngApplyLiveSessionReminderPreference(lead = null, text = "") {
+  if (!lead) return false;
+  const preference = ngLiveSessionReminderPreference(text);
+  if (preference === null || lead.live_session_reminders_opt_in === preference) return false;
+  lead.live_session_reminders_opt_in = preference;
+  lead.live_session_reminders_updated_at = nowIso();
+  return true;
+}
+
 function appendSocialConversation(db, { lead, platform, direction = "inbound", text = "", payload = {}, integration = null }) {
   const cleanPlatform = normalizeSocialPlatform(platform);
   const now = nowIso();
@@ -30756,6 +30776,7 @@ function appendSocialConversation(db, { lead, platform, direction = "inbound", t
       lead.last_inbound_at = now;
       lead.client_reached_out = true;
       lead.conversation_direction = lead.conversation_direction || "inbound";
+      ngApplyLiveSessionReminderPreference(lead, msgText);
     } else {
       lead.last_outbound_at = now;
       lead.agent_initiated = true;

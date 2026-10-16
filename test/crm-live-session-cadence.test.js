@@ -99,3 +99,28 @@ test("two failures of the same message on the same day stop retries", () => {
   assert.equal(guards.ngDailyLiveSessionAlreadyAttempted(db, l, "daily_session_invite", "2026-10-19"), true);
   assert.equal(guards.ngDailyLiveSessionAlreadyAttempted(db, l, "daily_session_invite", "2026-10-20"), false);
 });
+
+const prefSource = server.slice(
+  server.indexOf("function ngLiveSessionReminderPreference"),
+  server.indexOf("function appendSocialConversation"),
+);
+const pref = new Function("nowIso", `${prefSource}; return { ngLiveSessionReminderPreference, ngApplyLiveSessionReminderPreference };`)(() => "2026-10-17T00:00:00.000Z");
+
+test("a lead who asks for reminders is switched to the full sequence, and can switch it off", () => {
+  for (const text of ["Please remind me before the class", "can you send me the link before class?", "Send me a reminder", "notify me when it starts"]) {
+    assert.equal(pref.ngLiveSessionReminderPreference(text), true, text);
+  }
+  for (const text of ["Stop the reminders please", "don't send me links", "no more notifications"]) {
+    assert.equal(pref.ngLiveSessionReminderPreference(text), false, text);
+  }
+  assert.equal(pref.ngLiveSessionReminderPreference("I don't have the link, send me the link before class"), true);
+  for (const text of ["I'm at work at that time", "what is the price?", "I don't know the timing", ""]) {
+    assert.equal(pref.ngLiveSessionReminderPreference(text), null, text);
+  }
+  const l = lead({ created_at: daysAgo(2) });
+  assert.equal(pref.ngApplyLiveSessionReminderPreference(l, "remind me please"), true);
+  assert.equal(l.live_session_reminders_opt_in, true);
+  assert.equal(ok(l, "five_minute_reminder"), true);
+  pref.ngApplyLiveSessionReminderPreference(l, "stop reminders");
+  assert.equal(ok(l, "five_minute_reminder"), false);
+});
