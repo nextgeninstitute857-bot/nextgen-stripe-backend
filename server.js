@@ -30714,6 +30714,26 @@ function upsertSocialLead(db, platform, payload = {}) {
   return { lead, created: true };
 }
 
+// A lead who asks for class reminders ("remind me", "send me the link before
+// class") gets the full live-class sequence: 5-minute reminder, join link and
+// recording. "Stop the reminders" turns it off again. Anything else: no change.
+function ngLiveSessionReminderPreference(text = "") {
+  const t = String(text || "").toLowerCase();
+  if (!t) return null;
+  if (/\b(stop( sending)?( me)?( the)?|no more|(don'?t|do not|dont) send( me)?( the| any)?)\s+(class\s+)?(reminders?|notifications?|links?|messages?)\b/.test(t)) return false;
+  if (/\b(remind me|please remind|send (me )?(a |the )?reminders?|reminders? please|notify me|let me know before|send (me )?the (class |zoom |join |meeting )?link|link before (the )?class)\b/.test(t)) return true;
+  return null;
+}
+
+function ngApplyLiveSessionReminderPreference(lead = null, text = "") {
+  if (!lead) return false;
+  const preference = ngLiveSessionReminderPreference(text);
+  if (preference === null || lead.live_session_reminders_opt_in === preference) return false;
+  lead.live_session_reminders_opt_in = preference;
+  lead.live_session_reminders_updated_at = nowIso();
+  return true;
+}
+
 function appendSocialConversation(db, { lead, platform, direction = "inbound", text = "", payload = {}, integration = null }) {
   const cleanPlatform = normalizeSocialPlatform(platform);
   const now = nowIso();
@@ -30756,6 +30776,7 @@ function appendSocialConversation(db, { lead, platform, direction = "inbound", t
       lead.last_inbound_at = now;
       lead.client_reached_out = true;
       lead.conversation_direction = lead.conversation_direction || "inbound";
+      ngApplyLiveSessionReminderPreference(lead, msgText);
     } else {
       lead.last_outbound_at = now;
       lead.agent_initiated = true;
@@ -36578,7 +36599,10 @@ function ngLeadIsLmsStudent(lead = {}, keys = null) {
 // Mondays for three more weeks, then nothing. By default only the morning
 // invite goes out; the 5-minute reminder, join link and recording messages are
 // for leads who asked for reminders (or when the full sequence is switched on).
-const NG_DAILY_SESSION_REMINDER_ACTIONS = new Set(["five_minute_reminder", "session_link", "post_session_recording"]);
+// The approved invite template promises a reminder five minutes before class,
+// so that reminder (with its "Open Live Sessions" button) always follows an
+// invite. The start-time link and the recording are for leads who asked.
+const NG_DAILY_SESSION_REMINDER_ACTIONS = new Set(["session_link", "post_session_recording"]);
 
 function ngDailyLiveSessionLeadAnchorMs(db = {}, lead = {}) {
   const stamps = [lead.created_at, lead.first_seen_at, lead.last_inbound_at, lead.last_reply_at, lead.last_message_from_lead_at];
@@ -36603,7 +36627,7 @@ function ngDailyLiveSessionCadenceAllows(db = {}, lead = {}, settings = {}, acti
   if (days <= activeDays) return true;
   if (days > weeklyUntilDays) return false;
   const weekday = ngDailySessionTimeParts(now, "America/New_York").weekday;
-  return weekday === "Mon" && !NG_DAILY_SESSION_REMINDER_ACTIONS.has(action);
+  return weekday === "Mon";
 }
 
 function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}, context = {}) {
@@ -36793,7 +36817,10 @@ function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
     return ngBuildNoSessionRecordingFallbackText({ assets, lead });
   }
   if (action === "daily_session_invite") {
-    return `Doctor, today’s live class is ${sessionLabel || "not fully named yet"}.\n\nI’ll send a reminder 5 minutes before class and release the matching link when the session starts.`;
+    if (lead?.live_session_reminders_opt_in === true) {
+      return `Doctor, today’s live class is ${sessionLabel || "not fully named yet"}.\n\nI’ll send a reminder 5 minutes before class and release the matching link when the session starts.`;
+    }
+    return `Doctor, today’s live class is ${sessionLabel || "not fully named yet"}. You’re welcome to join and see how we teach.\n\nI’ll remind you 5 minutes before class. Would you also like the join link when it starts and the recording after? Just reply *remind me*.`;
   }
   if (action === "five_minute_reminder") {
     const joinLine = assets.liveSessionLink
