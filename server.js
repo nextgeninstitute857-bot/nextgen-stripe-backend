@@ -36599,7 +36599,10 @@ function ngLeadIsLmsStudent(lead = {}, keys = null) {
 // Mondays for three more weeks, then nothing. By default only the morning
 // invite goes out; the 5-minute reminder, join link and recording messages are
 // for leads who asked for reminders (or when the full sequence is switched on).
-const NG_DAILY_SESSION_REMINDER_ACTIONS = new Set(["five_minute_reminder", "session_link", "post_session_recording"]);
+// The approved invite template promises a reminder five minutes before class,
+// so that reminder (with its "Open Live Sessions" button) always follows an
+// invite. The start-time link and the recording are for leads who asked.
+const NG_DAILY_SESSION_REMINDER_ACTIONS = new Set(["session_link", "post_session_recording"]);
 
 function ngDailyLiveSessionLeadAnchorMs(db = {}, lead = {}) {
   const stamps = [lead.created_at, lead.first_seen_at, lead.last_inbound_at, lead.last_reply_at, lead.last_message_from_lead_at];
@@ -36624,7 +36627,7 @@ function ngDailyLiveSessionCadenceAllows(db = {}, lead = {}, settings = {}, acti
   if (days <= activeDays) return true;
   if (days > weeklyUntilDays) return false;
   const weekday = ngDailySessionTimeParts(now, "America/New_York").weekday;
-  return weekday === "Mon" && !NG_DAILY_SESSION_REMINDER_ACTIONS.has(action);
+  return weekday === "Mon";
 }
 
 function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}, context = {}) {
@@ -36814,7 +36817,10 @@ function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
     return ngBuildNoSessionRecordingFallbackText({ assets, lead });
   }
   if (action === "daily_session_invite") {
-    return `Doctor, today’s live class is ${sessionLabel || "not fully named yet"}.\n\nI’ll send a reminder 5 minutes before class and release the matching link when the session starts.`;
+    if (lead?.live_session_reminders_opt_in === true) {
+      return `Doctor, today’s live class is ${sessionLabel || "not fully named yet"}.\n\nI’ll send a reminder 5 minutes before class and release the matching link when the session starts.`;
+    }
+    return `Doctor, today’s live class is ${sessionLabel || "not fully named yet"}. You’re welcome to join and see how we teach.\n\nI’ll remind you 5 minutes before class. Would you also like the join link when it starts and the recording after? Just reply *remind me*.`;
   }
   if (action === "five_minute_reminder") {
     const joinLine = assets.liveSessionLink

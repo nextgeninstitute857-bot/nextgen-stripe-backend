@@ -49,10 +49,10 @@ const lead = (extra = {}) => ({ id: "lead-1", stage: "new_lead", whatsapp: "+1 5
 const ok = (l, action = "daily_session_invite", when = now, settings = {}, db = {}, lmsStudents = null) =>
   helpers.ngDailyLiveSessionEligibleLead(db, l, settings, { action, now: when, lmsStudents });
 
-test("a new lead gets only the morning invite by default", () => {
+test("a new lead gets the morning invite and its promised 5-minute reminder by default", () => {
   const l = lead({ created_at: daysAgo(2) });
   assert.equal(ok(l, "daily_session_invite"), true);
-  assert.equal(ok(l, "five_minute_reminder"), false);
+  assert.equal(ok(l, "five_minute_reminder"), true);
   assert.equal(ok(l, "session_link"), false);
   assert.equal(ok(l, "post_session_recording"), false);
 });
@@ -66,7 +66,8 @@ test("after the first week: one Monday invite for three weeks, then nothing", ()
   const l = lead({ created_at: daysAgo(10) });
   assert.equal(ok(l, "daily_session_invite", now), true); // Monday
   assert.equal(ok(lead({ created_at: daysAgo(11, tuesday) }), "daily_session_invite", tuesday), false); // Tuesday
-  assert.equal(ok(lead({ created_at: daysAgo(10), live_session_reminders_opt_in: true }), "session_link", now), false);
+  assert.equal(ok(lead({ created_at: daysAgo(10) }), "five_minute_reminder", now), true); // keeps the Monday invite's promise
+  assert.equal(ok(lead({ created_at: daysAgo(10) }), "session_link", now), false);
   assert.equal(ok(lead({ created_at: daysAgo(40) }), "daily_session_invite", now), false);
 });
 
@@ -120,7 +121,16 @@ test("a lead who asks for reminders is switched to the full sequence, and can sw
   const l = lead({ created_at: daysAgo(2) });
   assert.equal(pref.ngApplyLiveSessionReminderPreference(l, "remind me please"), true);
   assert.equal(l.live_session_reminders_opt_in, true);
-  assert.equal(ok(l, "five_minute_reminder"), true);
+  assert.equal(ok(l, "session_link"), true);
   pref.ngApplyLiveSessionReminderPreference(l, "stop reminders");
-  assert.equal(ok(l, "five_minute_reminder"), false);
+  assert.equal(ok(l, "session_link"), false);
+});
+
+const textSource = server.slice(server.indexOf("function ngDailyLiveSessionText"), server.indexOf("function ngRecordDailyLiveSessionPhaseState"));
+const textFor = new Function("ngBuildNoSessionRecordingFallbackText", `${textSource}; return ngDailyLiveSessionText;`)(() => "");
+
+test("the invite asks leads whether they want the link and recording", () => {
+  const assets = { liveSessionTitle: "Hematology - Day 1", sessionTime: "1:00 PM Eastern" };
+  assert.match(textFor("daily_session_invite", assets, { id: "l" }), /reply \*remind me\*/i);
+  assert.match(textFor("daily_session_invite", assets, { id: "l", live_session_reminders_opt_in: true }), /release the matching link/i);
 });
