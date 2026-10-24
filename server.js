@@ -34,6 +34,7 @@ import {
   fetchMetaAdsSnapshot,
   metaAdsReadiness,
 } from "./lib/crm-meta-ads.js";
+import { applyHubPublish, hubPublishKeyMatches, validateHubBundle } from "./lib/hub-content.js";
 import { createMetaReportingRunner, metaReportingStatus, prepareMetaDailyLedger, saveMetaPerformanceSnapshot, preserveMetaReportingForLegacyWrite } from "./lib/crm-meta-ads-reporting.js";
 import {
   AYLAMED_BRAND_ID,
@@ -1026,6 +1027,7 @@ const allowedOrigins = [
   "https://localhost",
   "https://nextgenusmle.live",
   "https://www.nextgenusmle.live",
+  "https://hub.nextgenusmle.live",
   "https://mediumslateblue-otter-394719.hostingersite.com",
   "https://paleturquoise-quail-255896.hostingersite.com",
   "https://aylamedapp.com",
@@ -1059,6 +1061,7 @@ function getCorsRequestHeaders(req) {
     "x-nextgen-admin",
     "x-nextgen-auth",
     "x-nextgen-source",
+    "x-hub-publish-key",
   ];
 
   if (!requested) return defaults.join(", ");
@@ -2528,6 +2531,9 @@ async function writeLiveDb(db, { teachingAccessSource = "lms_database_write" } =
     // These collections are written exclusively through mutateLiveDb. A legacy
     // request holding an older snapshot must not roll back an off switch or job.
     if (liveDbCache?.assessmentAutomation) db.assessmentAutomation = liveDbCache.assessmentAutomation;
+    // Hub content is only written through mutateLiveDb (POST /hub/content).
+    if (liveDbCache && "hubContent" in liveDbCache) db.hubContent = liveDbCache.hubContent;
+    if (liveDbCache && "hubContentHistory" in liveDbCache) db.hubContentHistory = liveDbCache.hubContentHistory;
     const readIds = liveReadAssessmentIds.get(db);
     if (readIds) {
       for (const [id, assessment] of Object.entries(liveDbCache?.assessments || {})) {
@@ -18704,6 +18710,34 @@ function ngNormalizeAdminRoadmapPayload(body = {}, existing = {}) {
     task_items: Array.isArray(body.task_items) ? body.task_items : Array.isArray(existing.task_items) ? existing.task_items : ngBuildDefaultTaskItems({ assessment_day: Boolean(body.assessment_day ?? existing.assessment_day) }),
   };
 }
+
+// NextGen USMLE Hub (hub.nextgenusmle.live): published study plan + announcements.
+// Reading is public; publishing needs the HUB_PUBLISH_KEY shared key.
+app.get("/hub/content", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, content: db.hubContent || null });
+  } catch (error) {
+    res.status(500).json({ success: false, error: "Hub content could not be read" });
+  }
+});
+
+app.post("/hub/content", async (req, res) => {
+  try {
+    if (String(process.env.HUB_PUBLISH_KEY || "").length < 16) {
+      return res.status(503).json({ success: false, error: "Publishing is not set up yet (HUB_PUBLISH_KEY is missing on the server)" });
+    }
+    if (!hubPublishKeyMatches(req.headers["x-hub-publish-key"], process.env.HUB_PUBLISH_KEY)) {
+      return res.status(401).json({ success: false, error: "Wrong publish code" });
+    }
+    const bundle = validateHubBundle(req.body);
+    const result = await mutateLiveDb((db) => applyHubPublish(db, bundle));
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.statusCode ? error.message : "Hub content could not be published" });
+  }
+});
 
 app.get("/admin/roadmap", async (req, res) => {
   try {
