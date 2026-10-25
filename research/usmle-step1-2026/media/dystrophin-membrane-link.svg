@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620" role="img" aria-labelledby="title desc">
+<title id="title">Dystrophin stabilizes the sarcolemma</title><desc id="desc">Muscle membrane linkage from actin through dystrophin and the glycoprotein complex to extracellular matrix.</desc>
+<rect width="1000" height="620" fill="#ffffff"/><rect x="20" y="20" width="960" height="580" rx="20" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+<text x="50" y="65" font-family="Arial,sans-serif" font-size="30" font-weight="700" fill="#0f172a">Dystrophin stabilizes the sarcolemma</text>
+<text x="70" y="115" font-family="Arial" font-size="21">Extracellular matrix</text>
+<path d="M70 145 C180 95 280 195 390 145 S600 195 710 145 S890 195 930 145" fill="none" stroke="#64748b" stroke-width="8"/>
+<rect x="70" y="230" width="860" height="55" rx="25" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="2"/><text x="80" y="220" font-family="Arial" font-size="20">Sarcolemma</text>
+<rect x="630" y="190" width="80" height="135" rx="15" fill="#f59e0b" stroke="#92400e" stroke-width="2"/><text x="620" y="355" font-family="Arial" font-size="18">Glycoprotein complex</text><line x1="670" y1="190" x2="670" y2="150" stroke="#92400e" stroke-width="6"/>
+<path d="M285 390 C360 335 450 445 525 390" fill="none" stroke="#16a34a" stroke-width="10"/><text x="305" y="440" font-family="Arial" font-size="20">Actin cytoskeleton</text>
+<rect x="520" y="300" width="65" height="130" rx="28" fill="#a78bfa" stroke="#6d28d9" stroke-width="2"/><text x="480" y="470" font-family="Arial" font-size="22" font-weight="700">Dystrophin</text>
+<line x1="552" y1="300" x2="642" y2="280" stroke="#6d28d9" stroke-width="7"/><line x1="520" y1="400" x2="510" y2="395" stroke="#6d28d9" stroke-width="7"/>
+<path d="M750 360 L900 500" stroke="#dc2626" stroke-width="6"/><path d="M900 360 L750 500" stroke="#dc2626" stroke-width="6"/><text x="735" y="545" font-family="Arial" font-size="19">Absent link → contraction injury</text>
+<text x="50" y="585" font-family="Arial,sans-serif" font-size="16" fill="#475569">AylaMed original teaching graphic — private research draft</text>
+</svg>

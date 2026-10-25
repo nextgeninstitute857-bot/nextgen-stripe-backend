@@ -1,0 +1,40 @@
+name: Rebalance USMLE Answer Positions
+
+on:
+  push:
+    branches:
+      - "research/usmle-step1-2026-original-qbank"
+    paths:
+      - "scripts/rebalance-usmle-answer-positions.mjs"
+      - ".github/workflows/rebalance-usmle-answer-positions.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  rebalance-private-drafts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "research/usmle-step1-2026-original-qbank"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Rebalance authored answer positions
+        run: node scripts/rebalance-usmle-answer-positions.mjs
+      - name: Validate private drafts after rebalancing
+        run: node scripts/validate-usmle-research-drafts.mjs
+      - name: Commit balanced private drafts
+        shell: bash
+        run: |
+          if git diff --quiet -- research/usmle-step1-2026/drafts; then
+            echo "Draft answer positions are already balanced."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add research/usmle-step1-2026/drafts
+          git commit -m "Rebalance private draft answer positions"
+          git push origin HEAD:research/usmle-step1-2026-original-qbank

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="title desc">
+<title id="title">Achalasia manometry schematic</title>
+<desc id="desc">Original AylaMed educational schematic. Not derived from proprietary question-bank media.</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#23395d"/></marker><style>.t{font:20px Arial,sans-serif;fill:#172033}.s{font:16px Arial,sans-serif;fill:#172033}.b{fill:#eef4ff;stroke:#23395d;stroke-width:3}.r{fill:#fff1f1;stroke:#8a2432;stroke-width:3}.g{fill:#eef9f0;stroke:#2d6a3f;stroke-width:3}.ln{stroke:#23395d;stroke-width:4;fill:none;marker-end:url(#arrow)}.dash{stroke:#8a2432;stroke-width:4;fill:none;stroke-dasharray:10 8}</style></defs>
+<rect width="960" height="560" fill="white"/>
+<text x="40" y="45" class="t">Swallow response: normal vs achalasia</text>
+<rect x="60" y="90" width="360" height="330" rx="18" class="g"/><text x="190" y="125" class="t">Normal</text>
+<path d="M120 165 C160 135,200 195,240 165 S320 195,360 165" class="ln"/><text x="95" y="225" class="s">Propagated contraction</text>
+<line x1="120" y1="330" x2="360" y2="330" stroke="#23395d" stroke-width="3"/><path d="M120 300 L190 300 L215 360 L290 360 L315 300 L360 300" fill="none" stroke="#2d6a3f" stroke-width="5"/><text x="135" y="395" class="s">LES pressure falls after swallow</text>
+<rect x="540" y="90" width="360" height="330" rx="18" class="r"/><text x="650" y="125" class="t">Achalasia</text>
+<path d="M600 165 L840 165" class="dash"/><text x="590" y="225" class="s">Absent propagated contraction</text>
+<line x1="600" y1="330" x2="840" y2="330" stroke="#23395d" stroke-width="3"/><path d="M600 280 L665 280 L695 300 L760 300 L790 280 L840 280" fill="none" stroke="#8a2432" stroke-width="5"/><text x="585" y="395" class="s">Incomplete LES relaxation</text>
+<text x="300" y="475" class="s">Key mechanism: loss of inhibitory NO/VIP myenteric neurons</text>
+<text x="30" y="535" class="s">AylaMed original teaching graphic • private research draft</text></svg>

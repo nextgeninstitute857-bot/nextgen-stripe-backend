@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+<title id="title">Tetanus toxin — original AylaMed teaching diagram</title>
+<desc id="desc">Synaptobrevin cleavage in interneurons. ↓GABA/glycine → spasticity.</desc>
+<style>
+.bg{fill:#f7f9fc}.panel{fill:#fff;stroke:#26364a;stroke-width:2}.accent{fill:#e9f1ff;stroke:#315a8b;stroke-width:2}
+.title{font:700 34px Arial;fill:#172536}.subtitle{font:700 21px Arial;fill:#315a8b}.body{font:18px Arial;fill:#172536}.small{font:600 15px Arial;fill:#5a6675}
+</style>
+<rect width="1200" height="720" class="bg"/>
+<rect x="30" y="30" width="1140" height="660" rx="28" class="panel"/>
+<text x="70" y="90" class="title">Tetanus toxin</text>
+<text x="70" y="135" class="small">Original mechanism-focused Step 1 teaching graphic</text>
+<rect x="70" y="180" width="310" height="390" rx="24" class="accent"/>
+<path d="M120 260 H190 C230 260 240 300 240 330 V370" fill="none" stroke="#315a8b" stroke-width="18" stroke-linecap="round"/><rect x="260" y="250" width="70" height="210" rx="30" fill="#dce9f8" stroke="#315a8b" stroke-width="5"/><g fill="#a13d3d"><circle cx="195" cy="305" r="11"/><circle cx="210" cy="335" r="11"/><circle cx="194" cy="365" r="11"/></g><path d="M235 330 H270" stroke="#a13d3d" stroke-width="6" stroke-dasharray="8 8"/>
+<rect x="420" y="180" width="330" height="390" rx="24" class="panel"/>
+<text x="470" y="230" class="subtitle">Mechanism</text><text x="470" y="285" class="body">Synaptobrevin cleavage in</text><text x="470" y="319" class="body">interneurons</text>
+<path d="M755 375 H805" stroke="#315a8b" stroke-width="7"/><path d="M805 375 l-20 -14 v28 z" fill="#315a8b"/>
+<rect x="820" y="180" width="310" height="390" rx="24" class="panel"/>
+<text x="840" y="230" class="subtitle">Key inference</text><text x="840" y="285" class="body">↓GABA/glycine →</text><text x="840" y="319" class="body">spasticity</text>
+<text x="600" y="645" text-anchor="middle" class="small">AylaMed original SVG — private research draft — publication blocked</text>
+</svg>

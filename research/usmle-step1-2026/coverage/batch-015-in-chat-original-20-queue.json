@@ -1,0 +1,385 @@
+{
+  "schema_version": "aylamed-backend-driven-gap-queue-v1",
+  "batch_id": "usmle-step1-2026-b015-in-chat-20-queue",
+  "created_at": "2026-08-04T23:39:08+05:00",
+  "status": "private_research_queue",
+  "publication_allowed": false,
+  "source_export": {
+    "file_name": "aylamed-qbank-json-no-media-2026-08-04(2).zip",
+    "records": 7937,
+    "unique_title_clusters": 2647,
+    "use": "coverage-frequency and full-stem lexical similarity screening only"
+  },
+  "selection_controls": {
+    "target_questions": 20,
+    "all_objectives_distinct": true,
+    "avoid_batches": "001-014",
+    "full_stem_similarity_check_completed": true,
+    "proprietary_text_or_media_used": false,
+    "original_media_required": true,
+    "medical_reference_verification_required": true,
+    "human_semantic_review_required": true
+  },
+  "entries": [
+    {
+      "rank": 1,
+      "backend_title": "Dilated cardiomyopathy",
+      "draft_id": "AY26-B015-CV-DCM-001",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Cardiomyopathy and ventricular remodeling",
+        "topic": "Dilated cardiomyopathy",
+        "subtopic": "Eccentric remodeling and sarcomeres added in series"
+      },
+      "learning_objective": "Relate systolic failure in dilated cardiomyopathy to sarcomeres added in series, myocyte elongation, chamber dilation, and eccentric remodeling.",
+      "media_path": "research/usmle-step1-2026/media/dilated-cardiomyopathy-eccentric-remodeling.svg",
+      "backend_evidence": {
+        "question_signal_count": 21,
+        "example_student_qid": "NGQ-00003867",
+        "example_source_title": "Calcineurin inhibitors"
+      }
+    },
+    {
+      "rank": 2,
+      "backend_title": "Glioblastoma",
+      "draft_id": "AY26-B015-NEURO-GBM-001",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Primary central nervous system tumors",
+        "topic": "Glioblastoma",
+        "subtopic": "Pseudopalisading necrosis, hypoxia, and VEGF-driven microvascular proliferation"
+      },
+      "learning_objective": "Connect glioblastoma pseudopalisading necrosis to hypoxia-induced HIF-1α stabilization, VEGF secretion, and microvascular proliferation.",
+      "media_path": "research/usmle-step1-2026/media/glioblastoma-hypoxia-pseudopalisading-vegf.svg",
+      "backend_evidence": {
+        "question_signal_count": 8,
+        "example_student_qid": "NGQ-00005645",
+        "example_source_title": "Glioblastoma (Multiforme)"
+      }
+    },
+    {
+      "rank": 3,
+      "backend_title": "Meningioma",
+      "draft_id": "AY26-B015-NEURO-MENINGIOMA-001",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Primary central nervous system tumors",
+        "topic": "Meningioma",
+        "subtopic": "Arachnoid cap-cell origin, whorls, and psammoma bodies"
+      },
+      "learning_objective": "Identify a dural-based whorled tumor with psammoma bodies as a meningioma derived from arachnoid cap cells.",
+      "media_path": "research/usmle-step1-2026/media/meningioma-arachnoid-whorls-psammoma.svg",
+      "backend_evidence": {
+        "question_signal_count": 4,
+        "example_student_qid": "NGQ-00005691",
+        "example_source_title": "Meningiomas"
+      }
+    },
+    {
+      "rank": 4,
+      "backend_title": "Primary sclerosing cholangitis",
+      "draft_id": "AY26-B015-GI-PSC-001",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Cholestatic and biliary disease",
+        "topic": "Primary sclerosing cholangitis",
+        "subtopic": "Multifocal strictures and concentric periductal fibrosis"
+      },
+      "learning_objective": "Recognize primary sclerosing cholangitis by ulcerative colitis, cholestasis, beaded ducts, and concentric periductal fibrosis.",
+      "media_path": "research/usmle-step1-2026/media/psc-beading-onion-skin.svg",
+      "backend_evidence": {
+        "question_signal_count": 3,
+        "example_student_qid": "NGQ-00004530",
+        "example_source_title": "Primary Sclerosing Cholangitis"
+      }
+    },
+    {
+      "rank": 5,
+      "backend_title": "Primary biliary cholangitis",
+      "draft_id": "AY26-B015-GI-PBC-001",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Cholestatic and biliary disease",
+        "topic": "Primary biliary cholangitis",
+        "subtopic": "Antimitochondrial immunity to pyruvate dehydrogenase complex E2"
+      },
+      "learning_objective": "Link the cholestatic phenotype of primary biliary cholangitis to antimitochondrial antibodies against pyruvate dehydrogenase complex E2.",
+      "media_path": "research/usmle-step1-2026/media/pbc-pdc-e2-florid-duct.svg",
+      "backend_evidence": {
+        "question_signal_count": 12,
+        "example_student_qid": "NGQ-00004962",
+        "example_source_title": "Primary biliary cholangitis"
+      }
+    },
+    {
+      "rank": 6,
+      "backend_title": "Pancreatic ductal adenocarcinoma",
+      "draft_id": "AY26-B015-GI-PDAC-001",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Pancreatic neoplasia",
+        "topic": "Pancreatic ductal adenocarcinoma",
+        "subtopic": "Activated stellate cells and desmoplastic stroma"
+      },
+      "learning_objective": "Explain the dense desmoplastic stroma of pancreatic ductal adenocarcinoma through activation of pancreatic stellate cells and cancer-associated fibroblasts.",
+      "media_path": "research/usmle-step1-2026/media/pancreatic-cancer-desmoplastic-stroma.svg",
+      "backend_evidence": {
+        "question_signal_count": 12,
+        "example_student_qid": "NGQ-00006037",
+        "example_source_title": "Pancreatic Cancer Risk Factors"
+      }
+    },
+    {
+      "rank": 7,
+      "backend_title": "Cholera",
+      "draft_id": "AY26-B015-ID-CHOLERA-001",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Enteric bacterial infection",
+        "topic": "Cholera",
+        "subtopic": "Gsα ADP-ribosylation, cAMP, and CFTR-mediated chloride secretion"
+      },
+      "learning_objective": "Trace cholera toxin from persistent Gs activation to increased cAMP, CFTR-mediated chloride secretion, and massive noninflammatory watery diarrhea.",
+      "media_path": "research/usmle-step1-2026/media/cholera-gs-camp-cftr.svg",
+      "backend_evidence": {
+        "question_signal_count": 4,
+        "example_student_qid": "NGQ-00006274",
+        "example_source_title": "V cholerae infective dose"
+      }
+    },
+    {
+      "rank": 8,
+      "backend_title": "Diphtheria",
+      "draft_id": "AY26-B015-ID-DIPHTHERIA-001",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Upper respiratory bacterial infection",
+        "topic": "Diphtheria",
+        "subtopic": "ADP-ribosylation of diphthamide on eukaryotic elongation factor 2"
+      },
+      "learning_objective": "Identify diphtheria toxin as an NAD-dependent ADP-ribosyltransferase that inactivates eEF-2 and stops protein synthesis.",
+      "media_path": "research/usmle-step1-2026/media/diphtheria-ef2-adp-ribosylation.svg",
+      "backend_evidence": {
+        "question_signal_count": 15,
+        "example_student_qid": "NGQ-00006316",
+        "example_source_title": "Diphtheria Culture"
+      }
+    },
+    {
+      "rank": 9,
+      "backend_title": "Tetanus",
+      "draft_id": "AY26-B015-ID-TETANUS-001",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neurotoxic bacterial disease",
+        "topic": "Tetanus",
+        "subtopic": "Synaptobrevin cleavage and loss of inhibitory neurotransmitter release"
+      },
+      "learning_objective": "Differentiate tetanus from other neuromuscular disorders by linking synaptobrevin cleavage in inhibitory interneurons to loss of GABA/glycine release and spastic paralysis.",
+      "media_path": "research/usmle-step1-2026/media/tetanus-synaptobrevin-inhibitory-block.svg",
+      "backend_evidence": {
+        "question_signal_count": 14,
+        "example_student_qid": "NGQ-00003951",
+        "example_source_title": "Tetanus"
+      }
+    },
+    {
+      "rank": 10,
+      "backend_title": "Botulism",
+      "draft_id": "AY26-B015-ID-BOTULISM-001",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neuromuscular junction disorders",
+        "topic": "Botulism",
+        "subtopic": "SNARE proteolysis and failure of presynaptic acetylcholine release"
+      },
+      "learning_objective": "Explain botulism as peripheral cholinergic paralysis caused by toxin-mediated SNARE cleavage and failure of acetylcholine vesicle fusion.",
+      "media_path": "research/usmle-step1-2026/media/botulism-snare-ach-block.svg",
+      "backend_evidence": {
+        "question_signal_count": 14,
+        "example_student_qid": "NGQ-00004010",
+        "example_source_title": "Botulism"
+      }
+    },
+    {
+      "rank": 11,
+      "backend_title": "Wiskott-Aldrich syndrome",
+      "draft_id": "AY26-B015-IMM-WAS-001",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Combined immunodeficiency",
+        "topic": "Wiskott-Aldrich syndrome",
+        "subtopic": "WASp-Arp2/3 actin remodeling at hematopoietic immune synapses"
+      },
+      "learning_objective": "Connect eczema, recurrent infection, and small-platelet thrombocytopenia to defective WASp-dependent actin remodeling in hematopoietic cells.",
+      "media_path": "research/usmle-step1-2026/media/wiskott-wasp-actin-synapse.svg",
+      "backend_evidence": {
+        "question_signal_count": 2,
+        "example_student_qid": "NGQ-00000641",
+        "example_source_title": "Wiskott-aldrich syndrome"
+      }
+    },
+    {
+      "rank": 12,
+      "backend_title": "Lambert-Eaton myasthenic syndrome",
+      "draft_id": "AY26-B015-NEURO-LEMS-001",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neuromuscular junction disorders",
+        "topic": "Lambert-Eaton myasthenic syndrome",
+        "subtopic": "Presynaptic P/Q-type calcium-channel autoimmunity and facilitation"
+      },
+      "learning_objective": "Recognize Lambert-Eaton syndrome as presynaptic P/Q-type calcium-channel autoimmunity causing reduced acetylcholine release and exercise-related facilitation.",
+      "media_path": "research/usmle-step1-2026/media/lambert-eaton-presynaptic-calcium.svg",
+      "backend_evidence": {
+        "question_signal_count": 4,
+        "example_student_qid": "NGQ-00006380",
+        "example_source_title": "Eaton-Lambert syndrome"
+      }
+    },
+    {
+      "rank": 13,
+      "backend_title": "Acromegaly",
+      "draft_id": "AY26-B015-ENDO-ACROMEGALY-001",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Pituitary hormone excess",
+        "topic": "Acromegaly",
+        "subtopic": "IGF-1 elevation and failure of growth-hormone suppression after oral glucose"
+      },
+      "learning_objective": "Use elevated IGF-1 and failure of oral-glucose-mediated GH suppression to confirm autonomous growth-hormone secretion in acromegaly.",
+      "media_path": "research/usmle-step1-2026/media/acromegaly-gh-igf1-glucose.svg",
+      "backend_evidence": {
+        "question_signal_count": 5,
+        "example_student_qid": "NGQ-00004033",
+        "example_source_title": "Acromegaly"
+      }
+    },
+    {
+      "rank": 14,
+      "backend_title": "Endometriosis",
+      "draft_id": "AY26-B015-REPRO-ENDOMETRIOSIS-001",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Gynecologic disorders",
+        "topic": "Endometriosis",
+        "subtopic": "Ectopic endometrial glands and stroma with cyclic hemorrhage"
+      },
+      "learning_objective": "Diagnose endometriosis by ectopic endometrial glands and stroma with cyclic hemorrhage, fibrosis, and hemosiderin-laden macrophages.",
+      "media_path": "research/usmle-step1-2026/media/endometriosis-ectopic-glands-hemosiderin.svg",
+      "backend_evidence": {
+        "question_signal_count": 15,
+        "example_student_qid": "NGQ-00000016",
+        "example_source_title": "Endometriosis"
+      }
+    },
+    {
+      "rank": 15,
+      "backend_title": "Lithium-induced nephrogenic diabetes insipidus",
+      "draft_id": "AY26-B015-RENAL-LITHIUM-NDI-001",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Water-balance disorders",
+        "topic": "Lithium-induced nephrogenic diabetes insipidus",
+        "subtopic": "ENaC-mediated lithium entry and aquaporin-2 downregulation"
+      },
+      "learning_objective": "Explain lithium-induced nephrogenic diabetes insipidus through ENaC entry into principal cells, aquaporin-2 downregulation, and the targeted benefit of amiloride.",
+      "media_path": "research/usmle-step1-2026/media/lithium-enac-aqp2-amiloride.svg",
+      "backend_evidence": {
+        "question_signal_count": 14,
+        "example_student_qid": "NGQ-00003834",
+        "example_source_title": "Lithium"
+      }
+    },
+    {
+      "rank": 16,
+      "backend_title": "Digoxin toxicity",
+      "draft_id": "AY26-B015-CV-DIGOXIN-001",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Cardiovascular pharmacology and toxicology",
+        "topic": "Digoxin toxicity",
+        "subtopic": "Sodium-potassium ATPase inhibition and extracellular potassium shift"
+      },
+      "learning_objective": "Connect severe digoxin toxicity to sodium-potassium ATPase inhibition, hyperkalemia, intracellular calcium loading, and arrhythmogenesis.",
+      "media_path": "research/usmle-step1-2026/media/digoxin-na-k-atpase-fab.svg",
+      "backend_evidence": {
+        "question_signal_count": 13,
+        "example_student_qid": "NGQ-00005337",
+        "example_source_title": "Digoxin"
+      }
+    },
+    {
+      "rank": 17,
+      "backend_title": "Klinefelter syndrome",
+      "draft_id": "AY26-B015-REPRO-KLINEFELTER-001",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Male reproductive genetics",
+        "topic": "Klinefelter syndrome",
+        "subtopic": "Seminiferous tubular hyalinization and hypergonadotropic hypogonadism"
+      },
+      "learning_objective": "Relate the Klinefelter phenotype and hypergonadotropic hypogonadism to seminiferous tubular hyalinization, germ-cell loss, and Leydig-cell dysfunction.",
+      "media_path": "research/usmle-step1-2026/media/klinefelter-seminiferous-hyalinization.svg",
+      "backend_evidence": {
+        "question_signal_count": 8,
+        "example_student_qid": "NGQ-00003936",
+        "example_source_title": "Klinefelter syndrome"
+      }
+    },
+    {
+      "rank": 18,
+      "backend_title": "Robertsonian translocation Down syndrome",
+      "draft_id": "AY26-B015-GEN-DOWN-ROB-001",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Cytogenetics",
+        "topic": "Robertsonian translocation Down syndrome",
+        "subtopic": "Meiotic segregation in a balanced rob(14;21) carrier"
+      },
+      "learning_objective": "Apply meiotic segregation of a balanced rob(14;21) carrier to identify the gamete that produces three copies of chromosome 21q.",
+      "media_path": "research/usmle-step1-2026/media/down-robertsonian-14-21.svg",
+      "backend_evidence": {
+        "question_signal_count": 21,
+        "example_student_qid": "NGQ-00005689",
+        "example_source_title": "Physician patient communication"
+      }
+    },
+    {
+      "rank": 19,
+      "backend_title": "Metastatic prostate adenocarcinoma",
+      "draft_id": "AY26-B015-GU-PROSTATE-BONE-001",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Male reproductive oncology",
+        "topic": "Metastatic prostate adenocarcinoma",
+        "subtopic": "Osteoblastic skeletal metastases and elevated alkaline phosphatase"
+      },
+      "learning_objective": "Recognize prostate-cancer skeletal metastases as osteoblastic-predominant lesions produced by tumor-stimulated new bone formation.",
+      "media_path": "research/usmle-step1-2026/media/prostate-osteoblastic-metastases.svg",
+      "backend_evidence": {
+        "question_signal_count": 34,
+        "example_student_qid": "NGQ-00004039",
+        "example_source_title": "Gynecomastia"
+      }
+    },
+    {
+      "rank": 20,
+      "backend_title": "Warfarin-induced skin necrosis",
+      "draft_id": "AY26-B015-HEME-WARFARIN-NECROSIS-001",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Anticoagulant pharmacology",
+        "topic": "Warfarin-induced skin necrosis",
+        "subtopic": "Rapid protein C depletion and transient microvascular thrombosis"
+      },
+      "learning_objective": "Explain early warfarin skin necrosis through rapid depletion of protein C, transient hypercoagulability, and dermal microvascular thrombosis.",
+      "media_path": "research/usmle-step1-2026/media/warfarin-protein-c-skin-necrosis.svg",
+      "backend_evidence": {
+        "question_signal_count": 26,
+        "example_student_qid": "NGQ-00003905",
+        "example_source_title": "Teratogens"
+      }
+    }
+  ]
+}

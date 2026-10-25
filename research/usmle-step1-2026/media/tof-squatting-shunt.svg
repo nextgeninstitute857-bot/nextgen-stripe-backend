@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img">
+<title>Tetralogy of Fallot — original AylaMed teaching diagram</title>
+<rect width="1200" height="720" fill="#f7f9fc"/><rect x="35" y="35" width="1130" height="650" rx="28" fill="#fff" stroke="#26364a" stroke-width="3"/>
+<text x="75" y="105" font-family="Arial" font-size="36" font-weight="700" fill="#172536">Tetralogy of Fallot</text>
+<rect x="75" y="165" width="300" height="390" rx="24" fill="#e9f1ff" stroke="#315a8b" stroke-width="3"/>
+<circle cx="225" cy="310" r="90" fill="#dce9f8" stroke="#315a8b" stroke-width="6"/><path d="M155 310 H295 M225 240 V380" stroke="#b13b3b" stroke-width="10" stroke-linecap="round"/>
+<text x="225" y="495" text-anchor="middle" font-family="Arial" font-size="18" font-weight="700" fill="#315a8b">ORIGINAL MECHANISM MAP</text>
+<rect x="425" y="165" width="315" height="390" rx="24" fill="#fff" stroke="#26364a" stroke-width="3"/>
+<text x="460" y="220" font-family="Arial" font-size="23" font-weight="700" fill="#315a8b">Mechanism</text>
+<foreignObject x="460" y="255" width="245" height="240"><div xmlns="http://www.w3.org/1999/xhtml" style="font:20px Arial;color:#172536;line-height:1.45">Squatting raises systemic vascular resistance</div></foreignObject>
+<path d="M755 355 H815" stroke="#315a8b" stroke-width="7"/><path d="M815 355 l-22 -15 v30 z" fill="#315a8b"/>
+<rect x="835" y="165" width="290" height="390" rx="24" fill="#fff" stroke="#26364a" stroke-width="3"/>
+<text x="870" y="220" font-family="Arial" font-size="23" font-weight="700" fill="#315a8b">Key inference</text>
+<foreignObject x="870" y="255" width="220" height="240"><div xmlns="http://www.w3.org/1999/xhtml" style="font:20px Arial;color:#172536;line-height:1.45">Less right-to-left VSD flow; more pulmonary flow</div></foreignObject>
+<text x="600" y="640" text-anchor="middle" font-family="Arial" font-size="16" font-weight="700" fill="#5a6675">AylaMed original SVG — private research draft</text>
+</svg>

@@ -1,0 +1,76 @@
+name: Run Private USMLE 100 Pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type GENERATE-100-PRIVATE"
+        required: true
+        type: string
+      run_id:
+        description: "Private run identifier"
+        required: true
+        type: string
+      planner_model:
+        description: "Planner model"
+        required: true
+        type: string
+      writer_model:
+        description: "Writer model"
+        required: true
+        type: string
+      reviewer_model:
+        description: "Reviewer model"
+        required: true
+        type: string
+      input_usd_per_million:
+        description: "Current input-token price per million USD"
+        required: true
+        type: string
+      output_usd_per_million:
+        description: "Current output-token price per million USD"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  AYLA_PILOT_EXECUTE: "yes"
+  AYLA_PILOT_RUN_ID: ${{ inputs.run_id }}
+  AYLA_PILOT_PLANNER_MODEL: ${{ inputs.planner_model }}
+  AYLA_PILOT_WRITER_MODEL: ${{ inputs.writer_model }}
+  AYLA_PILOT_REVIEWER_MODEL: ${{ inputs.reviewer_model }}
+  AYLA_INPUT_USD_PER_MILLION: ${{ inputs.input_usd_per_million }}
+  AYLA_OUTPUT_USD_PER_MILLION: ${{ inputs.output_usd_per_million }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+jobs:
+  generate-private-artifact:
+    if: ${{ inputs.confirmation == 'GENERATE-100-PRIVATE' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    concurrency:
+      group: usmle-private-pilot-100
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate generator before spending credits
+        run: node scripts/validate-usmle-pilot-generator.mjs
+      - name: Require configured API secret
+        run: test -n "$OPENAI_API_KEY"
+      - name: Generate and independently review 100 private drafts
+        run: node scripts/run-usmle-pilot-generator.mjs --execute
+      - name: Upload private run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: usmle-pilot-${{ inputs.run_id }}
+          path: research/usmle-step1-2026/pilot-100/runs/${{ inputs.run_id }}/
+          if-no-files-found: error
+          retention-days: 30
+
+# This workflow has no push, merge, deployment, import, or publication step.

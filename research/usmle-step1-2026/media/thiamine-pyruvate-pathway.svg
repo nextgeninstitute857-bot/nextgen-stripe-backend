@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560" role="img" aria-labelledby="title desc">
+  <title id="title">Thiamine and pyruvate metabolism</title>
+  <desc id="desc">Original pathway showing pyruvate conversion to acetyl-CoA by thiamine-dependent pyruvate dehydrogenase and diversion to lactate when the reaction is impaired.</desc>
+  <rect width="980" height="560" fill="#ffffff"/>
+  <text x="490" y="45" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#173f4c">Pyruvate metabolism in thiamine deficiency</text>
+  <rect x="80" y="220" width="220" height="90" rx="18" fill="#e8f5f7" stroke="#247b89" stroke-width="3"/>
+  <text x="190" y="275" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#173f4c">Pyruvate</text>
+  <line x1="300" y1="265" x2="640" y2="170" stroke="#2c8357" stroke-width="7" marker-end="url(#greenArrow)"/>
+  <rect x="370" y="120" width="220" height="62" rx="14" fill="#fff5d8" stroke="#c18400" stroke-width="2"/>
+  <text x="480" y="147" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#7a5200">Pyruvate dehydrogenase</text>
+  <text x="480" y="170" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#7a5200">requires thiamine pyrophosphate</text>
+  <rect x="650" y="105" width="250" height="90" rx="18" fill="#eaf7ed" stroke="#2c8357" stroke-width="3"/>
+  <text x="775" y="145" text-anchor="middle" font-family="Arial, sans-serif" font-size="23" font-weight="700" fill="#225f40">Acetyl-CoA</text>
+  <text x="775" y="174" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#3e7054">citric acid cycle</text>
+
+  <line x1="300" y1="275" x2="640" y2="385" stroke="#c44848" stroke-width="7" marker-end="url(#redArrow)"/>
+  <rect x="650" y="340" width="250" height="90" rx="18" fill="#fff0f0" stroke="#c44848" stroke-width="3"/>
+  <text x="775" y="380" text-anchor="middle" font-family="Arial, sans-serif" font-size="23" font-weight="700" fill="#8d3030">Lactate ↑</text>
+  <text x="775" y="409" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#8d3030">regenerates NAD+</text>
+  <rect x="365" y="360" width="230" height="62" rx="14" fill="#f9eeee" stroke="#c44848" stroke-width="2"/>
+  <text x="480" y="386" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#8d3030">Lactate dehydrogenase</text>
+  <text x="480" y="409" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#8d3030">favored when PDH activity falls</text>
+
+  <rect x="160" y="455" width="660" height="70" rx="16" fill="#f4f0fb" stroke="#70569c" stroke-width="2"/>
+  <text x="490" y="484" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#503b73">After a glucose load</text>
+  <text x="490" y="510" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" fill="#503b73">more pyruvate is produced, increasing lactate when thiamine-dependent oxidation is impaired</text>
+  <defs>
+    <marker id="greenArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#2c8357"/></marker>
+    <marker id="redArrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#c44848"/></marker>
+  </defs>
+</svg>

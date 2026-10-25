@@ -1,0 +1,273 @@
+{
+  "schema_version": "aylamed-coverage-matrix-v1",
+  "batch_id": "usmle-step1-2026-b014-in-chat-original-20",
+  "status": "private_research_matrix",
+  "publication_allowed": false,
+  "source_export": {
+    "records": 7937,
+    "unique_title_clusters": 2647,
+    "explicit_media_candidates": 786
+  },
+  "entries": [
+    {
+      "draft_id": "AY26-B014-CV-FH-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Lipid metabolism and atherosclerosis",
+        "topic": "Familial hypercholesterolemia",
+        "subtopic": "LDL-receptor-mediated endocytosis of apoB-100 particles"
+      },
+      "learning_objective": "Connect preserved LDL binding but defective coated-pit internalization to impaired hepatic clearance of apoB-100 particles in familial hypercholesterolemia.",
+      "media_path": "research/usmle-step1-2026/media/fh-ldlr-coated-pit-endocytosis.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-CV-EISENMENGER-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Congenital heart disease",
+        "topic": "Ventricular septal defect and Eisenmenger syndrome",
+        "subtopic": "Pulmonary vascular remodeling and shunt reversal"
+      },
+      "learning_objective": "Explain Eisenmenger syndrome as reversal of a chronic large VSD shunt after pulmonary vascular resistance exceeds systemic resistance.",
+      "media_path": "research/usmle-step1-2026/media/vsd-eisenmenger-shunt-reversal.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-CV-COARCTATION-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Congenital vascular disease",
+        "topic": "Coarctation of the aorta",
+        "subtopic": "Intercostal collateral circulation and rib notching"
+      },
+      "learning_objective": "Trace the subclavian–internal thoracic–intercostal collateral route that bypasses postductal coarctation and produces inferior rib notching.",
+      "media_path": "research/usmle-step1-2026/media/coarctation-intercostal-collaterals.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B014-RENAL-MCD-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Glomerular disease",
+        "topic": "Minimal change disease",
+        "subtopic": "Podocyte foot-process effacement"
+      },
+      "learning_objective": "Recognize minimal change disease from the triad of normal light microscopy, negative immunofluorescence, and diffuse podocyte foot-process effacement.",
+      "media_path": "research/usmle-step1-2026/media/minimal-change-three-modality-panel.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B014-RENAL-IGA-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Glomerular disease",
+        "topic": "IgA nephropathy",
+        "subtopic": "Galactose-deficient IgA1 immune complexes"
+      },
+      "learning_objective": "Connect galactose-deficient IgA1 and antiglycan antibodies to mesangial immune-complex deposition and synpharyngitic hematuria.",
+      "media_path": "research/usmle-step1-2026/media/iga-nephropathy-four-hit-pathway.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-RENAL-RTA4-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Tubular acid-base disorders",
+        "topic": "Type IV renal tubular acidosis",
+        "subtopic": "Hypoaldosteronism, hyperkalemia, and reduced ammonium excretion"
+      },
+      "learning_objective": "Explain type IV RTA through reduced aldosterone effect, hyperkalemia-mediated suppression of ammoniagenesis, and low urinary ammonium despite urine pH below 5.5.",
+      "media_path": "research/usmle-step1-2026/media/type4-rta-aldosterone-ammonium.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-HEME-HEMOPHILIA-A-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Coagulation disorders",
+        "topic": "Hemophilia A",
+        "subtopic": "Factor VIII and intrinsic tenase"
+      },
+      "learning_objective": "Interpret a correcting mixing study as factor deficiency and connect hemophilia A to loss of factor VIIIa support for intrinsic tenase.",
+      "media_path": "research/usmle-step1-2026/media/hemophilia-a-intrinsic-tenase-mixing.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B014-HEME-CML-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Myeloproliferative neoplasms",
+        "topic": "Chronic myeloid leukemia",
+        "subtopic": "BCR-ABL1 constitutive tyrosine kinase"
+      },
+      "learning_objective": "Relate the Philadelphia chromosome to constitutive BCR-ABL1 kinase signaling and the characteristic chronic-phase CML blood profile.",
+      "media_path": "research/usmle-step1-2026/media/cml-philadelphia-bcr-abl1.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B014-HEME-HODGKIN-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Lymphoid neoplasms",
+        "topic": "Classical Hodgkin lymphoma",
+        "subtopic": "Reed-Sternberg B-cell origin and reactive microenvironment"
+      },
+      "learning_objective": "Recognize classical Hodgkin lymphoma as a sparse Reed-Sternberg-cell neoplasm that builds a cytokine-recruited reactive microenvironment.",
+      "media_path": "research/usmle-step1-2026/media/hodgkin-rs-reactive-microenvironment.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-IMM-DIGEORGE-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Primary immunodeficiency",
+        "topic": "22q11.2 deletion syndrome",
+        "subtopic": "Third and fourth pharyngeal pouch failure"
+      },
+      "learning_objective": "Map thymic and parathyroid hypoplasia plus conotruncal disease to 22q11.2-associated third/fourth pouch and neural-crest developmental failure.",
+      "media_path": "research/usmle-step1-2026/media/digeorge-pouch-neural-crest-map.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B014-IMM-ADA-SCID-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Primary immunodeficiency",
+        "topic": "ADA-deficient severe combined immunodeficiency",
+        "subtopic": "Deoxyadenosine toxicity and ribonucleotide-reductase inhibition"
+      },
+      "learning_objective": "Explain ADA-SCID through deoxyadenosine-derived dATP accumulation, ribonucleotide-reductase inhibition, and lymphocyte DNA-synthesis failure.",
+      "media_path": "research/usmle-step1-2026/media/ada-scid-datp-ribonucleotide-reductase.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-NEURO-ALZHEIMER-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neurodegeneration",
+        "topic": "Alzheimer disease",
+        "subtopic": "Amyloidogenic APP processing"
+      },
+      "learning_objective": "Contrast nonamyloidogenic alpha-secretase processing with beta/gamma-secretase generation of aggregation-prone Aβ42.",
+      "media_path": "research/usmle-step1-2026/media/alzheimer-app-secretase-pathways.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-NEURO-HUNTINGTON-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neurodegeneration",
+        "topic": "Huntington disease",
+        "subtopic": "CAG-repeat expansion and paternal anticipation"
+      },
+      "learning_objective": "Connect paternal anticipation in Huntington disease to germline CAG expansion and relate the mutation to caudate-predominant neurodegeneration.",
+      "media_path": "research/usmle-step1-2026/media/huntington-paternal-cag-anticipation.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B014-NEURO-ABSENCE-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Seizure disorders",
+        "topic": "Childhood absence epilepsy",
+        "subtopic": "Thalamic T-type calcium current"
+      },
+      "learning_objective": "Recognize childhood absence epilepsy and link ethosuximide efficacy to blockade of thalamic T-type calcium currents.",
+      "media_path": "research/usmle-step1-2026/media/absence-3hz-thalamic-t-type.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B014-TOX-ORGANOPHOSPHATE-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Toxicology",
+        "topic": "Organophosphate poisoning",
+        "subtopic": "Acetylcholinesterase phosphorylation and aging"
+      },
+      "learning_objective": "Distinguish atropine receptor antagonism from pralidoxime enzyme reactivation and explain the time dependence created by acetylcholinesterase aging.",
+      "media_path": "research/usmle-step1-2026/media/organophosphate-ache-aging-pralidoxime.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-TOX-ACETAMINOPHEN-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Toxicology",
+        "topic": "Acetaminophen toxicity",
+        "subtopic": "NAPQI formation, glutathione depletion, and N-acetylcysteine"
+      },
+      "learning_objective": "Explain acetaminophen hepatotoxicity through NAPQI accumulation and identify glutathione restoration as the central rescue mechanism of N-acetylcysteine.",
+      "media_path": "research/usmle-step1-2026/media/acetaminophen-napqi-glutathione-nac.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B014-GI-FAP-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Colorectal neoplasia",
+        "topic": "Familial adenomatous polyposis",
+        "subtopic": "APC–beta-catenin destruction complex"
+      },
+      "learning_objective": "Connect biallelic APC loss to beta-catenin stabilization, Wnt-target transcription, and the diffuse colorectal adenoma phenotype of FAP.",
+      "media_path": "research/usmle-step1-2026/media/fap-apc-beta-catenin-destruction.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-GI-HEMOCHROMATOSIS-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Hepatic metabolic disease",
+        "topic": "Hereditary hemochromatosis",
+        "subtopic": "Hepcidin–ferroportin regulation"
+      },
+      "learning_objective": "Explain HFE-related iron overload through deficient hepcidin induction and unrestrained ferroportin-mediated intestinal absorption and macrophage iron release.",
+      "media_path": "research/usmle-step1-2026/media/hemochromatosis-hepcidin-ferroportin.svg",
+      "difficulty": "hard"
+    },
+    {
+      "draft_id": "AY26-B014-ENDO-MEN2-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Hereditary endocrine neoplasia",
+        "topic": "Multiple endocrine neoplasia type 2",
+        "subtopic": "Activating RET mutation"
+      },
+      "learning_objective": "Recognize MEN2 from medullary thyroid carcinoma and pheochromocytoma and identify germline RET activation as the inherited driver.",
+      "media_path": "research/usmle-step1-2026/media/men2-ret-thyroid-adrenal-pedigree.svg",
+      "difficulty": "moderate"
+    },
+    {
+      "draft_id": "AY26-B014-ENDO-ADDISON-001",
+      "exam": "USMLE Step 1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Adrenal disorders",
+        "topic": "Primary adrenal insufficiency",
+        "subtopic": "POMC-derived melanocortin signaling and hyperpigmentation"
+      },
+      "learning_objective": "Explain hyperpigmentation in primary adrenal insufficiency through loss of cortisol feedback, increased POMC/ACTH production, and melanocortin-1 receptor stimulation.",
+      "media_path": "research/usmle-step1-2026/media/addison-pomc-acth-mc1r.svg",
+      "difficulty": "moderate"
+    }
+  ]
+}

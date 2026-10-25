@@ -1,0 +1,27 @@
+{
+  "schema_version": "aylamed-answer-order-policy-v1",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "student_delivery": {
+    "shuffle_required": true,
+    "shuffle_scope": "per_question_per_attempt",
+    "algorithm": "sha256_rank_v1",
+    "seed_source": "server_issued_non_public_attempt_identifier",
+    "preserve_option_ids": true,
+    "score_by_option_id_server_side": true,
+    "expose_correct_option_id_before_submission": false,
+    "reuse_order_when_attempt_resumes": true
+  },
+  "authoring": {
+    "avoid_position_clues": true,
+    "avoid_length_clues": true,
+    "avoid_grammar_clues": true,
+    "plausible_distractors_required": true,
+    "future_batch_max_authored_position_share": 0.3,
+    "future_batch_max_consecutive_same_position": 3
+  },
+  "validation": {
+    "synthetic_attempts": 100,
+    "maximum_absolute_position_share_deviation": 0.04
+  }
+}

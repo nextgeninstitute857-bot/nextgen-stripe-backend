@@ -1,0 +1,75 @@
+{
+  "schema_version": "aylamed-usmle-originality-audit-v2",
+  "batch_id": "usmle-step1-2026-b012-in-chat-original-20",
+  "audited_at": "2026-08-04T21:59:23+05:00",
+  "source_export": {
+    "file_name": "aylamed-qbank-json-no-media-2026-08-04(1).zip",
+    "records": 7937,
+    "fields_used": [
+      "id",
+      "student_qid",
+      "title",
+      "stem_signal"
+    ],
+    "usage": "lexical similarity screening and coverage prioritization only",
+    "runtime_availability": "raw ZIP mounted and parsed locally"
+  },
+  "methodology": {
+    "normalization": "HTML removed; Unicode NFKD; lowercase alphanumeric tokenization; whitespace compacted",
+    "external_screen": "Each committed stem compared with all 7,937 exported stem_signal values",
+    "metrics": [
+      "exact normalized equality",
+      "five-token Jaccard",
+      "four-token Jaccard",
+      "RapidFuzz character ratio"
+    ],
+    "quarantine_thresholds": {
+      "exact_normalized_match": true,
+      "five_token_jaccard_greater_than_or_equal": 0.2,
+      "character_ratio_percent_greater_than_or_equal": 75.0
+    },
+    "within_batch": "All 190 stem pairs compared using exact equality, five-token Jaccard, and character ratio",
+    "scope_limit": "This is lexical screening, not a substitute for human semantic/copyright review or clinician review"
+  },
+  "results": {
+    "stems_checked": 20,
+    "external_comparisons": 158740,
+    "exact_normalized_matches": 0,
+    "close_paraphrase_quarantine_flags": 0,
+    "maximum_external_five_token_jaccard": {
+      "score": 0.023077,
+      "draft_id": "AY26-B012-CV-ASD-001",
+      "source_student_qid": "NGQ-00000100",
+      "source_title": "Bone marrow transplantation"
+    },
+    "maximum_external_four_token_jaccard": 0.032609,
+    "maximum_external_character_ratio_percent": {
+      "score": 53.168,
+      "draft_id": "AY26-B012-ID-SYPHILIS-001",
+      "source_student_qid": "NGQ-00007043",
+      "source_title": "Syphilitic Aneurysm"
+    },
+    "within_batch_duplicate_flags": 0,
+    "maximum_within_batch_five_token_jaccard": {
+      "score": 0.009174,
+      "pair": [
+        "AY26-B012-RENAL-STRUVITE-001",
+        "AY26-B012-ENDO-PHEO-001"
+      ]
+    },
+    "maximum_within_batch_character_ratio_percent": {
+      "score": 50.0,
+      "pair": [
+        "AY26-B012-CV-ASD-001",
+        "AY26-B012-CV-AORTIC-REGURG-001"
+      ]
+    },
+    "disposition": "No lexical quarantine flags; retain as private drafts pending human similarity, factual, media, and clinician review"
+  },
+  "reviewer_notes": [
+    "No proprietary stem, option, explanation, screenshot, or media is intentionally copied.",
+    "The source ZIP was used only for coverage signals and lexical comparison.",
+    "Low lexical overlap does not prove semantic originality; human similarity review remains required.",
+    "No import, merge, deployment, student exposure, or publication is authorized."
+  ]
+}
